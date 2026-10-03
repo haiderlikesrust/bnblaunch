@@ -1,0 +1,10 @@
+import { PORTAL, TAX_V3_IMPL, portalAbi } from '../shared/flap-contract.mjs';
+export { PORTAL, TAX_V3_IMPL, portalAbi };
+import { encodeFunctionData, getContractAddress, keccak256, toHex, zeroAddress, type Address, type Hex } from "viem";
+import type { Coin } from "./model";
+// Verified against the Flap Portal interface and deployment docs, 2026-10-03.
+// https://docs.flap.sh/flap/developers/token-launcher-developers/launch-token-through-portal
+export function predictedAddress(salt:Hex){return getContractAddress({from:PORTAL,salt,bytecode:("0x3d602d80600a3d3981f3363d3d373d3d3d363d73"+TAX_V3_IMPL.slice(2).toLowerCase()+"5af43d82803e903d91602b57fd5bf3") as Hex,opcode:"CREATE2"})}
+export async function findSalt(){let salt=toHex(crypto.getRandomValues(new Uint8Array(32)));for(let i=0;i<1000000;i++){const address=predictedAddress(salt);if(address.toLowerCase().endsWith("7777"))return {salt,address};salt=keccak256(salt);if(i%1000===0)await new Promise(r=>setTimeout(r,0))}throw new Error("Address search limit reached. Retry to use a fresh random seed.")}
+export function launchParams(coin:Coin,cid:string,beneficiary:Address,salt:Hex){return {name:coin.name,symbol:coin.symbol,meta:cid,dexThresh:0,salt,migratorType:1,quoteToken:zeroAddress,quoteAmt:0n,beneficiary,permitData:"0x" as Hex,extensionID:("0x"+"0".repeat(64)) as Hex,extensionData:"0x" as Hex,dexId:0,lpFeeProfile:0,buyTaxRate:coin.taxRate*100,sellTaxRate:coin.taxRate*100,taxDuration:365n*24n*60n*60n,antiFarmerDuration:3600n,mktBps:coin.treasury*100,deflationBps:coin.burn*100,dividendBps:coin.holders*100,lpBps:coin.liquidity*100,minimumShareBalance:coin.holders>0?10000n*10n**18n:0n,dividendToken:zeroAddress,commissionReceiver:zeroAddress,tokenVersion:6};}
+export function launchCalldata(coin:Coin,cid:string,beneficiary:Address,salt:Hex){return encodeFunctionData({abi:portalAbi,functionName:"newTokenV6",args:[launchParams(coin,cid,beneficiary,salt)]});}

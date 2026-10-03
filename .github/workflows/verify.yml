@@ -1,0 +1,46 @@
+name: Verify SHEN and Dokploy stack
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APP_ORIGIN: https://shen-ci.example
+      POSTGRES_PASSWORD: disposableCiPasswordOnlyNeverDeploy
+      SIGNER_MASTER_KEY: "1111111111111111111111111111111111111111111111111111111111111111"
+      SERVICE_CREDENTIALS_KEY: "3333333333333333333333333333333333333333333333333333333333333333"
+      SIGNER_WEB_TOKEN: ci-web-token-only-111111111111111111111111111111111111
+      SIGNER_WORKER_TOKEN: ci-worker-token-only-22222222222222222222222222222222222
+      WORKER_TOKEN: ci-app-worker-only-333333333333333333333333333333333333
+      BNB_RPC_URL: https://bsc-dataseed.bnbchain.org
+      SIGNER_SETTLEMENT_ADDRESS: "0x2222222222222222222222222222222222222222"
+      SIGNER_GAS_RESERVE_WEI: "2000000000000000"
+      SIGNER_MAX_GAS_PRICE_WEI: "3000000000"
+      SIGNER_DAILY_SPEND_BPS: "7500"
+      SIGNER_SLIPPAGE_BPS: "100"
+      SIGNER_BUYBACKS_ENABLED: "false"
+      SMOKE_TEST_FIXTURE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: node --experimental-strip-types --test tests/*.test.mjs services/signer/store.test.mjs
+      - run: docker compose -p shen-ci -f compose.dokploy.yaml -f compose.ci.yaml config --quiet
+      - name: Build and start production services
+        run: |
+          docker network create dokploy-network
+          docker compose -p shen-ci -f compose.dokploy.yaml -f compose.ci.yaml build worker
+          docker compose -p shen-ci -f compose.dokploy.yaml -f compose.ci.yaml up -d --build --wait --wait-timeout 180 gateway signer
+      - run: node scripts/smoke-dokploy.mjs
+      - name: Stack diagnostics
+        if: failure()
+        run: docker compose -p shen-ci -f compose.dokploy.yaml -f compose.ci.yaml logs --tail 60
+      - name: Stop isolated stack
+        if: always()
+        run: docker compose -p shen-ci -f compose.dokploy.yaml -f compose.ci.yaml down

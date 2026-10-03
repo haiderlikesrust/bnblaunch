@@ -1,0 +1,8 @@
+import type { Coin } from "./model";
+import { agentModel, DEFAULT_AGENT_PURPOSE } from "./agent-models";
+
+// Explicit projection: account identifiers, secrets and internal ledgers never go to chat.
+export function publicCoin(coin:Coin):Coin{
+ return {id:coin.id,imageUrl:coin.imageUrl,name:coin.name,symbol:coin.symbol,description:coin.description,language:coin.language,purpose:coin.purpose??DEFAULT_AGENT_PURPOSE,modelId:agentModel(coin.modelId).id,threshold:coin.threshold,taxRate:coin.taxRate,treasury:coin.treasury,holders:coin.holders,burn:coin.burn,liquidity:coin.liquidity,balance:coin.balance,state:coin.state,social:coin.social,research:coin.research,website:coin.website,images:coin.images,buyback:coin.buyback,dailyBudget:0,reserve:0,tokenAddress:coin.tokenAddress,treasuryAddress:coin.treasuryAddress,site:coin.site};
+}
+export function chatSnapshot(coin:Coin){return {name:coin.name,symbol:coin.symbol,story:coin.description,purpose:coin.purpose??DEFAULT_AGENT_PURPOSE,model:agentModel(coin.modelId).name,language:coin.language,state:coin.state,treasuryBnb:coin.balance,balanceSource:"last saved confirmed snapshot; not a live balance",activationThresholdBnb:coin.threshold,feeRouting:"100% of distributable revenue to agent; service costs covered first",capabilities:{research:coin.research,social:coin.social,images:coin.images,website:coin.website},tokenAddress:coin.tokenAddress??null,recordedActions:[],executionStatus:"Operational health and execution must be verified from worker records; this snapshot does not certify them",chatAuthority:"questions only; no operational permissions"}}

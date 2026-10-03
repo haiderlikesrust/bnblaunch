@@ -1,0 +1,3 @@
+import { getUser } from "@/lib/auth";
+import { AppError, db, failure, response } from "@/lib/server";
+export async function GET(_request:Request,{params}:{params:Promise<{id:string}>}){try{const user=await getUser(),{id}=await params;const coin=await db().prepare("SELECT id FROM coins WHERE id=? AND (token_address IS NOT NULL OR owner=?)").bind(id,user?.userId??"").first();if(!coin)throw new AppError(404,"Coin not found");const events=await db().prepare("SELECT id,message,created_at AS createdAt FROM events WHERE coin_id=? ORDER BY created_at DESC LIMIT 100").bind(id).all();return response({events:events.results})}catch(e){return failure(e)}}

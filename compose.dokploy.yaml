@@ -1,0 +1,144 @@
+services:
+  gateway:
+    build:
+      context: .
+      target: gateway
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    expose: ["80"]
+    networks: [dokploy-network, app]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      SHEN_RUNTIME: node
+      HOST: 0.0.0.0
+      PORT: "3000"
+      APP_ORIGIN: ${APP_ORIGIN:?Set your exact HTTPS origin}
+      DATABASE_URL: postgres://shen:${POSTGRES_PASSWORD:?Set a long alphanumeric password}@postgres:5432/shen
+      SIGNER_URL: http://signer:8080
+      SIGNER_WEB_TOKEN: ${SIGNER_WEB_TOKEN:?Set the app provisioning credential}
+      SIGNER_SETTLEMENT_ADDRESS: ${SIGNER_SETTLEMENT_ADDRESS:?Set the platform billing wallet}
+      WORKER_TOKEN: ${WORKER_TOKEN:?Set the worker API credential}
+      BNB_RPC_URL: ${BNB_RPC_URL:?Set a BNB mainnet RPC}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MANAGEMENT_KEY: ${OPENROUTER_MANAGEMENT_KEY:-}
+      OPENROUTER_IMAGE_MODEL: ${OPENROUTER_IMAGE_MODEL:-bytedance-seed/seedream-4.5}
+      AGENT_DAILY_LIMIT_MICROUSD: ${AGENT_DAILY_LIMIT_MICROUSD:-0}
+      CHAT_DAILY_LIMIT_MICROUSD: ${CHAT_DAILY_LIMIT_MICROUSD:-0}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      BRAVE_COST_MICROUSD: ${BRAVE_COST_MICROUSD:-0}
+      TWITTERAPI_IO_KEY: ${TWITTERAPI_IO_KEY:-}
+      TWITTERAPI_IO_PROXY: ${TWITTERAPI_IO_PROXY:-}
+      SERVICE_CREDENTIALS_KEY: ${SERVICE_CREDENTIALS_KEY:?Set the account-session encryption key}
+      X_LOGIN_DAILY_LIMIT_MICROUSD: ${X_LOGIN_DAILY_LIMIT_MICROUSD:-1000000}
+      X_POST_COST_MICROUSD: ${X_POST_COST_MICROUSD:-3000}
+      X_UPLOAD_COST_MICROUSD: ${X_UPLOAD_COST_MICROUSD:-3000}
+      X_READ_COST_MICROUSD: ${X_READ_COST_MICROUSD:-5000}
+      PORKBUN_API_KEY: ${PORKBUN_API_KEY:-}
+      PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:-}
+      RELAY_API_KEY: ${RELAY_API_KEY:-}
+    networks: [app, database, signing]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 210s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    depends_on:
+      web:
+        condition: service_healthy
+      signer:
+        condition: service_healthy
+    environment:
+      SHEN_APP_URL: http://web:3000
+      WORKER_TOKEN: ${WORKER_TOKEN:?Set the worker API credential}
+      SIGNER_WORKER_TOKEN: ${SIGNER_WORKER_TOKEN:?Set a separate worker signing credential}
+      SIGNER_INTERNAL_URL: http://signer:8080
+    networks: [app, signing]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 240s
+      retries: 3
+  signer:
+    build:
+      context: .
+      target: signer
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes:
+      - shen-wallets:/data
+    environment:
+      SIGNER_MASTER_KEY: ${SIGNER_MASTER_KEY:?Set wallet encryption key}
+      SIGNER_WEB_TOKEN: ${SIGNER_WEB_TOKEN:?Set app provisioning credential}
+      SIGNER_WORKER_TOKEN: ${SIGNER_WORKER_TOKEN:?Set worker signing credential}
+      BNB_RPC_URL: ${BNB_RPC_URL:?Set a BNB mainnet RPC}
+      SIGNER_SETTLEMENT_ADDRESS: ${SIGNER_SETTLEMENT_ADDRESS:?Set platform billing wallet}
+      SIGNER_GAS_RESERVE_WEI: ${SIGNER_GAS_RESERVE_WEI:?Set gas reserve}
+      SIGNER_MAX_GAS_PRICE_WEI: ${SIGNER_MAX_GAS_PRICE_WEI:?Set gas-price ceiling}
+      SIGNER_DAILY_SPEND_BPS: ${SIGNER_DAILY_SPEND_BPS:?Set treasury spending ceiling}
+      SIGNER_SLIPPAGE_BPS: ${SIGNER_SLIPPAGE_BPS:?Set swap slippage}
+      SIGNER_BUYBACKS_ENABLED: ${SIGNER_BUYBACKS_ENABLED:-false}
+    networks: [signing]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shen
+      POSTGRES_DB: shen
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a long alphanumeric password}
+    volumes:
+      - shen-postgres:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shen -d shen"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+volumes:
+  shen-postgres:
+  shen-wallets:
+networks:
+  dokploy-network:
+    external: true
+  app:
+  signing:
+  database:
+    internal: true

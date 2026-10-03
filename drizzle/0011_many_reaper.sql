@@ -1,0 +1,1 @@
+ALTER TABLE `content_jobs` ADD `next_attempt_at` integer DEFAULT 0 NOT NULL;

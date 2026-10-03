@@ -1,0 +1,31 @@
+import { z } from "zod";
+import { AppError, body, db, failure, identity, ownedCoin, remoteJson, response } from "@/lib/server";
+import { validateImage } from "@/lib/token-image";
+
+export async function POST(request:Request,{params}:{params:Promise<{id:string}>}){try{
+ const owner=await identity(request),{coin}=await ownedCoin((await params).id,owner);
+ if(coin.tokenAddress)throw new AppError(403,"Launched token artwork is permanent.");
+ let file:File;
+ if(request.headers.get('content-type')?.includes('application/json')){
+  z.object({useSavedImage:z.literal(true)}).strict().parse(await body(request));
+  const saved=await db().prepare("SELECT mime,base64 FROM coin_images WHERE coin_id=?").bind(coin.id).first<{mime:'image/png'|'image/jpeg'|'image/webp';base64:string}>();
+  if(!saved)throw new AppError(400,"Upload a token image first.");
+  const bytes=validateImage(saved);
+  file=new File([bytes],`token.${saved.mime.split('/')[1]}`,{type:saved.mime});
+ }else{
+  if(coin.imageUrl)throw new AppError(400,"Use the image saved with this launch plan.");
+  if(Number(request.headers.get("content-length")||0)>2200000)throw new AppError(413,"Logo must be less than 2 MB");
+  const form=await request.formData(),value=form.get("image");
+  if(!(value instanceof File)||value.size>2000000||value.size<12||!["image/png","image/jpeg","image/webp"].includes(value.type))throw new AppError(400,"Use a PNG, JPEG or WebP smaller than 2 MB");
+  const b=new Uint8Array(await value.slice(0,12).arrayBuffer());
+  const valid=(value.type==="image/png"&&b[0]===137&&b[1]===80&&b[2]===78&&b[3]===71)||(value.type==="image/jpeg"&&b[0]===255&&b[1]===216)||(value.type==="image/webp"&&String.fromCharCode(...b.slice(0,4))==="RIFF"&&String.fromCharCode(...b.slice(8,12))==="WEBP");
+  if(!valid)throw new AppError(400,"Image contents do not match its file type");
+  file=value;
+ }
+ const data=new FormData();
+ data.append("operations",JSON.stringify({query:"mutation Create($file: Upload!, $meta: MetadataInput!) { create(file: $file, meta: $meta) }",variables:{file:null,meta:{website:null,twitter:null,telegram:null,description:coin.description,creator:owner}}}));
+ data.append("map",JSON.stringify({"0":["variables.file"]}));data.append("0",file);
+ const result=await remoteJson<{data?:{create:string};errors?:unknown[]}>("https://funcs.flap.sh/api/upload",{method:"POST",body:data});
+ if(result.errors||!result.data?.create)throw new AppError(502,"Flap metadata upload failed");
+ return response({cid:result.data.create})
+}catch(e){return failure(e)}}

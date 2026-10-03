@@ -1,0 +1,5 @@
+{
+ "name":"shen-agent-signer","private":true,"type":"module","engines":{"node":">=22.13.0"},
+ "scripts":{"start":"node index.mjs","test":"node --test store.test.mjs"},
+ "dependencies":{"viem":"2.57.2"}
+}

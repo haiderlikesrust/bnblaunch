@@ -1,0 +1,4 @@
+# Disposable CI stack only; production publishes the gateway through Traefik.
+services:
+  gateway:
+    ports: ["127.0.0.1:8088:80"]

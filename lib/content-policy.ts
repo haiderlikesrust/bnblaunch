@@ -1,0 +1,14 @@
+import { z } from 'zod';
+import twitterText from 'twitter-text';
+export const IMAGE_MODEL='bytedance-seed/seedream-4.5';
+export const supportedImageModels=[IMAGE_MODEL,'bytedance-seed/seedream-5-0-flash'];
+export const publicationInput=z.object({destination:z.enum(['x','gallery']),text:z.string().trim().min(1).max(1000),imagePrompt:z.string().trim().min(10).max(1200).nullable(),altText:z.string().trim().max(240)}).strict().superRefine((v,ctx)=>{if(v.destination==='x'&&!twitterText.parseTweet(v.text).valid)ctx.addIssue({code:z.ZodIssueCode.custom,message:'X text exceeds its weighted character limit'});if(v.destination==='gallery'&&!v.imagePrompt)ctx.addIssue({code:z.ZodIssueCode.custom,message:'Gallery entries require an image'});});
+export type Publication= z.infer<typeof publicationInput>;
+export function validatePublication(value:Publication,capabilities:{social:boolean;images:boolean;connected:boolean}){if(value.destination==='x'&&(!capabilities.social||!capabilities.connected))throw Error('X account is not ready');if(value.imagePrompt&&!capabilities.images)throw Error('Image generation is not enabled');return publicationInput.parse(value);}
+export function normalizedTweet(text:string){return text.normalize('NFC').replace(/\r\n/g,'\n').trim();}
+type ReadTweet={id?:string;text?:string;createdAt?:string;author?:{id?:string};isReply?:boolean;isRetweet?:boolean;retweeted_tweet?:unknown;quoted_tweet?:unknown;displayTextRange?:number[];entities?:{urls?:{url?:string;expanded_url?:string}[]};extendedEntities?:{media?:{id_str?:string;id?:string;url?:string}[]}};
+export function canonicalTweet(v:ReadTweet){let text=v.text??'';const range=v.displayTextRange;if(Array.isArray(range)&&range.length===2&&range.every(Number.isInteger)&&range[0]===0&&range[1]>=0&&range[1]<=text.length)text=text.slice(0,range[1]);for(const m of v.extendedEntities?.media??[])if(typeof m.url==='string'&&text.endsWith(m.url))text=text.slice(0,-m.url.length).trimEnd();for(const u of v.entities?.urls??[])if(typeof u.url==='string'&&typeof u.expanded_url==='string'&&/^https?:\/\//.test(u.expanded_url))text=text.replaceAll(u.url,u.expanded_url);return normalizedTweet(text);}
+export function matchingTweet(tweets:unknown[],expected:{userId:string;text:string;startedAt:number;mediaId?:string|null}){
+ const matches=tweets.filter((raw)=>{if(!raw||typeof raw!=='object')return false;const v=raw as ReadTweet;const at=Date.parse(v.createdAt??'');return typeof v.id==='string'&&/^\d+$/.test(v.id)&&v.author?.id===expected.userId&&!v.isReply&&!v.isRetweet&&!v.retweeted_tweet&&!v.quoted_tweet&&typeof v.text==='string'&&canonicalTweet(v)===normalizedTweet(expected.text)&&at>=expected.startedAt-60000&&at<=expected.startedAt+600000&&(!expected.mediaId||v.extendedEntities?.media?.some(m=>String(m.id_str??m.id??'')===expected.mediaId));});
+ return matches.length===1?(matches[0] as {id:string}).id:null;
+}

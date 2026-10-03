@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.git
+.env*
+.dev.vars*
+.wrangler
+dist
+.next
+.vinext
+.sites-runtime
+**/*.sqlite*
+**/data
+*.tsbuildinfo
