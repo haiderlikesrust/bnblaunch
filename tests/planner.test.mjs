@@ -1,0 +1,72 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
+import { readdirSync, readFileSync } from 'node:fs';
+import { PGlite } from '@electric-sql/pglite';
+import { createDatabase, migratePostgres } from '../server/postgres.mjs';
+import { resolve } from 'node:path';
+register('./planner-loader.mjs',import.meta.url);
+const env=globalThis.__shenTestEnv={OPENROUTER_API_KEY:'test',OPENROUTER_MANAGEMENT_KEY:'test',SIGNER_URL:'https://signer.test',SIGNER_WEB_TOKEN:'test-only-'.repeat(6)};
+const {runAgentTick}=await import('../lib/runtime.ts');
+const {publishedWebsite}=await import('../lib/websites.ts');
+const {agentPlan}=await import('../lib/runtime-policy.ts');
+const {boundedPlanningContext,contextBytes}=await import('../lib/planning-context.ts');
+const {DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL}=await import('../lib/agent-models.ts');
+const originalFetch=globalThis.fetch;
+const token='0x1111111111111111111111111111111111117777',wallet='0x2222222222222222222222222222222222222222',processor='0x3333333333333333333333333333333333333333';
+const site={title:'A community with a curious mind',tagline:'Research, explain, create.',about:'A community exploring verified developments on BNB.',theme:'jade',layout:'editorial',sections:[{heading:'Our purpose',body:'Explain verified progress.'}],faq:[{question:'Who manages the agent?',answer:'The agent operates independently after launch.'}]};
+const plan={summary:'Publish the community website.',nextCheckMinutes:60,closeChatMinutes:0,transaction:{kind:'none',amountWei:'0',reason:'No transaction needed.'},website:site,publication:null};
+function fixture(){
+ const sql=new DatabaseSync(':memory:');sql.exec('PRAGMA foreign_keys=ON');for(const name of readdirSync('drizzle').filter(n=>n.endsWith('.sql')).sort())sql.exec(readFileSync('drizzle/'+name,'utf8'));
+ function prepare(query,values=[]){return {bind(...v){return prepare(query,v)},async run(){return {meta:{changes:Number(sql.prepare(query).run(...values).changes)}}},async all(){return {results:sql.prepare(query).all(...values)}},async first(){return sql.prepare(query).get(...values)??null}}}
+ env.DB={prepare,async batch(statements){sql.exec('BEGIN');try{const result=[];for(const s of statements)result.push(await s.run());sql.exec('COMMIT');return result}catch(e){sql.exec('ROLLBACK');throw e}}};
+ const now=Date.now(),coin={id:'coin',name:'Community',symbol:'MIND',description:'A community documenting verified progress.',purpose:'Explain the project.',modelId:DEFAULT_AGENT_MODEL,language:'en',threshold:.1,balance:1,state:'active',website:true,images:false,social:false,research:false,tokenAddress:token,treasuryAddress:wallet};
+ sql.prepare('INSERT INTO coins(id,owner,config,token_address,treasury_address,created_at,updated_at,ai_credit_microusd) VALUES(?,?,?,?,?,?,?,?)').run('coin','owner',JSON.stringify(coin),token,wallet,new Date(now).toISOString(),new Date(now).toISOString(),1000000);
+ globalThis.__plannerChain={getChainId:async()=>56,getBlock:async()=>({number:100n,hash:'0x'+'a'.repeat(64),timestamp:BigInt(Math.floor(Date.now()/1000))}),readContract:async({functionName})=>{
+  const values={balanceOf:0n,taxProcessor:processor,taxToken:token,marketAddress:wallet,weth:'0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',feeConfigV2:{isWeth:true,marketBps:10000,lpBps:0,dividendBps:0,deflationBps:0},totalQuoteSentToMarketing:1000000n,marketQuoteBalance:5n,decimals:8,latestRoundData:[1n,60000000000n,0n,BigInt(Math.floor(Date.now()/1000)),1n]};if(!(functionName in values))throw Error(functionName);return values[functionName];}};
+ let expiry=false,reject=false,fail=false,output=plan;const calls=[];
+ const json=v=>new Response(JSON.stringify(v));
+ globalThis.fetch=async(url,init={})=>{const u=String(url);
+  if(u.endsWith('/balance'))return json({address:wallet,tokenAddress:token,balanceWei:'1000000000000000000',observedAt:now,block:'100'});
+  if(u.endsWith('/v1/status'))return json({chainId:56,signingReady:true,settlementAddress:wallet,gasReserveWei:'2000000000000000',buybacksEnabled:false});
+  if(u.endsWith('/v1/models'))return json({data:[...new Set([DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL])].map(id=>({id,pricing:{prompt:'0.000001',completion:'0.000001'},supported_parameters:['response_format']}))});
+  if(u.endsWith('/v1/credits'))return json({data:{total_credits:100000,total_usage:0}});
+  if(u.includes('geckoterminal'))return json({data:{id:'bsc_'+token,attributes:{address:token,market_cap_usd:'42000',fdv_usd:'50000',price_usd:'.01',total_reserve_in_usd:'5000',volume_usd:{h24:'900'}},relationships:{top_pools:{data:[]}}}});
+  if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}})}
+  throw Error('Unexpected external call '+u);
+ };
+ return {sql,calls,coin,expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
+}
+test('funded planner has no daily money cap, receives market/fee/cost context and publishes a real site',async()=>{
+ const f=fixture();try{
+  f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,cost_microusd,created_at) VALUES('past','coin','plan','settled',0,9000000000,?)").run(new Date().toISOString());
+  const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');
+  const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.spending.dailyMonetaryLimit,null);assert.equal(Number(snapshot.spending.serviceCostMicrousd.lastHour),9000000000);assert.equal(snapshot.spending.market.valuation.marketCapUsd,42000);assert.equal(snapshot.spending.feeFlow.status,'baseline');assert.equal(snapshot.needsWebsite,true);assert.equal(f.calls[0].max_tokens,2200);
+  const live=await publishedWebsite('coin');assert.equal(live.site.title,site.title);assert.equal(live.site.url,'/sites/coin');assert.equal(live.site.revision,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,999800);
+  f.due();await runAgentTick(['autonomous-planning']);assert.equal((await publishedWebsite('coin')).site.revision,1,'identical content does not create another revision');
+ }finally{f.close()}
+});
+test('a rejected update or ambiguous provider failure preserves the last committed site',async()=>{
+ const f=fixture();try{await runAgentTick(['autonomous-planning']);f.due();f.output({...plan,website:{...site,title:'Unverified replacement'}});f.reject();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal((await publishedWebsite('coin')).site.title,site.title);f.due();f.fail();await assert.rejects(runAgentTick(['autonomous-planning']));assert.equal((await publishedWebsite('coin')).site.revision,1)}finally{f.close()}
+});
+test('an expired planning lease cannot publish a website',async()=>{
+ const f=fixture();try{f.expire();await assert.rejects(runAgentTick(['autonomous-planning']),/lease expired/);assert.equal(await publishedWebsite('coin'),null);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0)}finally{f.close()}
+});
+test('website content rejects arbitrary code fields, links and unsupported themes',()=>{
+ for(const invalid of [{...site,html:'<script>alert(1)</script>'},{...site,url:'https://evil.example'},{...site,theme:'javascript:'},{...site,sections:[{heading:'Hello',body:'Text',script:'x'}]}])assert.equal(agentPlan.safeParse({...plan,website:invalid}).success,false);
+});
+test('large Chinese history fits the byte budget without dropping the mission or financial signals',()=>{
+ const snapshot={mission:'使命'.repeat(700),treasuryWei:'1000000000000000000',sources:Array.from({length:3},()=>({description:'研究'.repeat(500)})),community:{recent:Array.from({length:5},()=>({text:'内容'.repeat(1200)}))},website:{about:'故事'.repeat(1800)},spending:{market:{marketCapUsd:100000,lastCandles:Array.from({length:12},()=>({time:Date.now(),open:1,high:2,low:.5,close:1.5}))}}};
+ const result=boundedPlanningContext('Follow the mission.',snapshot);assert.ok(contextBytes('Follow the mission.',result)<=31000);assert.equal(result.mission,snapshot.mission);assert.equal(result.treasuryWei,snapshot.treasuryWei);assert.equal(result.spending.market.marketCapUsd,100000);assert.equal(result.contextTruncated,true);assert.equal(snapshot.community.recent.length,5);
+});
+test('the real funded planner and website revision transaction execute against PostgreSQL',async()=>{
+ const f=fixture(),pg=new PGlite();await pg.waitReady;
+ try{
+  await migratePostgres({query:(sql,params)=>params?pg.query(sql,params):pg.exec(sql).then(r=>r[0]??{rows:[]})},resolve('drizzle'));
+  await pg.query('INSERT INTO coins(id,owner,config,token_address,treasury_address,created_at,updated_at,ai_credit_microusd) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',['coin','owner',JSON.stringify(f.coin),token,wallet,new Date().toISOString(),new Date().toISOString(),1000000]);
+  // One PGlite connection; serialize pool checkout just like a real pool client.
+  let tail=Promise.resolve();env.DB=createDatabase({async connect(){const prior=tail;let release;tail=new Promise(r=>{release=r});await prior;return {async query(sql,params){const result=await pg.query(sql,params);return {...result,rowCount:result.affectedRows??result.rows.length}},release}}});
+  const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');assert.equal(Number((await publishedWebsite('coin')).site.revision),1);assert.equal((await pg.query('SELECT status FROM agent_runs')).rows[0].status,'settled');
+ }finally{await pg.close();f.close()}
+});

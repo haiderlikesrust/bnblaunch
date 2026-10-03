@@ -13,13 +13,14 @@ export async function chatPrice(id:string):Promise<ChatPrice>{
  return {id,prompt:p,completion:c};
 }
 // Bound input by UTF-8 bytes plus chat framing, and outputs including reasoning by max_tokens.
-// Each input is capped below 32 KB; provider routes must honor the quoted token prices.
-export function callCeiling(price:ChatPrice){return Math.ceil((price.prompt*40000+price.completion*800)*1e6)+10}
-export async function chatCompletion(price:ChatPrice,system:string,data:unknown){
+// Q&A/planner input is capped at 32 KB; the independent plan guard allows 64 KB.
+// Reservations use the same input/output bounds as their requests.
+export function callCeiling(price:ChatPrice,maxOutputTokens=800,maxInputBytes=32000){return Math.ceil((price.prompt*(maxInputBytes+8000)+price.completion*maxOutputTokens)*1e6)+10}
+export async function chatCompletion(price:ChatPrice,system:string,data:unknown,maxOutputTokens=800,maxInputBytes=32000){
  const messages=[{role:"system",content:system},{role:"user",content:JSON.stringify(data)}];
- if(new TextEncoder().encode(JSON.stringify(messages)).length>32000)throw new AppError(413,"Chat context is too large.");
+ if(new TextEncoder().encode(JSON.stringify(messages)).length>maxInputBytes)throw new AppError(413,"Chat context is too large.");
  if(!env.OPENROUTER_API_KEY)throw new AppError(412,"SHEN's shared OpenRouter account is not configured.");
- const r=await remoteJson<{choices:{finish_reason:string;message:{content:string;tool_calls?:unknown;function_call?:unknown}}[];usage?:{cost?:number}}>("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+env.OPENROUTER_API_KEY,"Content-Type":"application/json","X-Title":"SHEN read-only Q&A"},body:JSON.stringify({model:price.id,messages,max_tokens:800,temperature:0,response_format:{type:"json_object"},provider:{require_parameters:true,allow_fallbacks:false,max_price:{prompt:price.prompt*1e6,completion:price.completion*1e6,request:0}}})});
+ const r=await remoteJson<{choices:{finish_reason:string;message:{content:string;tool_calls?:unknown;function_call?:unknown}}[];usage?:{cost?:number}}>("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+env.OPENROUTER_API_KEY,"Content-Type":"application/json","X-Title":"SHEN read-only Q&A"},body:JSON.stringify({model:price.id,messages,max_tokens:maxOutputTokens,temperature:0,response_format:{type:"json_object"},provider:{require_parameters:true,allow_fallbacks:false,max_price:{prompt:price.prompt*1e6,completion:price.completion*1e6,request:0}}})});
  const choice=r.choices?.[0];
  if(!choice||choice.finish_reason!=="stop"||choice.message.tool_calls||choice.message.function_call||typeof choice.message.content!=="string")throw new AppError(503,"The answer could not be verified. No action was taken.");
  if(typeof r.usage?.cost!=="number"||!Number.isFinite(r.usage.cost)||r.usage.cost<0)throw new AppError(503,"Chat cost is awaiting reconciliation.");

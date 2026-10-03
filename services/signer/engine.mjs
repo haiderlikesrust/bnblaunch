@@ -97,8 +97,6 @@ export class SigningEngine {
       const gas=estimated*120n/100n;if(gas>2000000n) throw Error('Gas estimate exceeds transaction policy');
       const cost=transaction.value+gas*gasPrice,available=balance<confirmed?balance:confirmed;
       if(available<cost+this.policy.gasReserveWei) throw Error('Insufficient confirmed funds after gas reserve');
-      const spent=this.store.recentSpend(row.coin_id);
-      if(spent+cost>(available+spent)*BigInt(this.policy.dailySpendBps)/10000n) throw Error('Adaptive treasury spending allowance reached');
       const expected={...transaction,nonce,gas,gasPrice};
       const raw=await this.store.account(row.coin_id).signTransaction({...expected,chainId:56,type:'legacy'});
       await this.store.persistSigned(row.id,fence,raw,expected);

@@ -12,6 +12,17 @@ function fixture(path=':memory:',master=key()) {const store=new WalletStore(path
 const expected={to:recipient,value:100n,data:'0x',nonce:0,gas:21000n,gasPrice:1000000000n};
 const sign=(store,overrides={})=>store.account(coin).signTransaction({...expected,chainId:56,type:'legacy',...overrides});
 
+test('agent can spend above the former daily fraction while confirmed funds and gas remain enforced',async()=>{
+ for(const balance of [110n,100n]){
+  const {store,id}=fixture();try{
+   const client={getChainId:async()=>56,getBlock:async()=>({number:100n,timestamp:BigInt(Math.floor(Date.now()/1000))}),getTransactionCount:async()=>0,getBalance:async()=>balance,getGasPrice:async()=>1n,estimateGas:async()=>1n,getTransactionReceipt:async()=>{const error=Error();error.name='TransactionReceiptNotFoundError';throw error},sendRawTransaction:async()=>{throw Error('No network in this test')}};
+   const engine=new SigningEngine(store,client,{settlementAddress:recipient,gasReserveWei:1n,maxGasPriceWei:2n});engine.bindLaunch=async()=>{};
+   const execute=()=>engine.execute({id,coinId:coin,kind:'compute',amountWei:'100',expiresAt:Date.now()+60000});
+   if(balance===110n){await execute();assert.ok(store.signedBytes(id))}else{await assert.rejects(execute(),/Insufficient confirmed funds/);assert.equal(store.signedBytes(id),null)}
+  }finally{store.close()}
+ }
+});
+
 test('coin wallets are isolated, idempotent, and encrypted with coin-bound AAD',()=>{
   const store=new WalletStore(':memory:',key());try{
     const a=store.provision(coin);assert.deepEqual(store.provision(coin),a);assert.notEqual(store.provision(coin2).address,a.address);

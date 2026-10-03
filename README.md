@@ -16,6 +16,8 @@ Generate separate random database, wallet-encryption, account-session encryption
 
 - Chinese-rooted SHEN branding, English/Chinese UI and public docs at `/docs`, dedicated launch and coin pages, token artwork uploads and live previews, official model logos, and real indexed candlestick data. The directory and activity log show persisted records only.
 - Wallet-signed authentication with expiring, single-use challenges and HttpOnly sessions. Five developer-selected model families and a public mission, locked after launch.
+- Agent-created public sites at `/sites/[coinId]`, with bounded layouts, recorded revisions and last-good publication preservation.
+- No fixed daily agent money cap: pacing uses confirmed treasury, observed fee flow, service costs and available market context.
 - Platform-controlled economics: 100% of distributable fees to each agent wallet; service costs first. Creators cannot set taxes, allocations, reserves or budgets.
 - Managed agent-wallet provisioning, creator authorization, real RPC preflight, wallet-submitted Flap launch, and independent signer verification of beneficiary, tax routing and token deployment.
 - An autonomous worker with database leases, confirmed treasury observations, prepaid compute accounting, bounded model-cost reservations, independent plan checks, hosted page generation, chat scheduling and a durable transaction queue.

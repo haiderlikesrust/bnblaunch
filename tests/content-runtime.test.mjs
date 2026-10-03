@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { sealServiceSecret } from '../shared/service-secrets.mjs';
 register('./runtime-loader.mjs',import.meta.url);
-const env=globalThis.__shenTestEnv={OPENROUTER_API_KEY:'test-only-key',TWITTERAPI_IO_KEY:'test-only-key',TWITTERAPI_IO_PROXY:'http://proxy.example:80',SERVICE_CREDENTIALS_KEY:randomBytes(32).toString('hex'),AGENT_DAILY_LIMIT_MICROUSD:'10000000',X_LOGIN_DAILY_LIMIT_MICROUSD:'1000000'};
+const env=globalThis.__shenTestEnv={OPENROUTER_API_KEY:'test-only-key',TWITTERAPI_IO_KEY:'test-only-key',TWITTERAPI_IO_PROXY:'http://proxy.example:80',SERVICE_CREDENTIALS_KEY:randomBytes(32).toString('hex'),X_LOGIN_DAILY_LIMIT_MICROUSD:'1000000'};
 const {runContentTick}=await import('../lib/content-runtime.ts');
 const {connectX,verifyXConnection,socialStatus}=await import('../lib/social-onboarding.ts');
 const originalFetch=globalThis.fetch;

@@ -33,14 +33,12 @@ async function reserveJob(job:Job,coin:Coin,publication:Publication){
  const account=await xAccount(job.coin_id);validatePublication(publication,{social:coin.social,images:coin.images,connected:!!account});
  const quote=publication.imagePrompt?await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL):null,costs=xCosts();
  if(publication.destination==='x'&&(!xConfigured()||await xProvider(env.TWITTERAPI_IO_KEY!).balance()<costs.post+costs.upload+costs.read*3))return false;
- const ceiling=(quote?.ceiling??0)+(publication.destination==='x'?costs.post+(quote?costs.upload:0)+costs.read*3:0),now=Date.now(),day=new Date(now-86400000).toISOString(),cap=Number(env.AGENT_DAILY_LIMIT_MICROUSD);
- if(!Number.isSafeInteger(cap)||cap<=0)return false;
+ const ceiling=(quote?.ceiling??0)+(publication.destination==='x'?costs.post+(quote?costs.upload:0)+costs.read*3:0),now=Date.now();
  const result=await db().batch([
   db().prepare(`INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) SELECT ?,id,'content','reserved',?,? FROM coins WHERE id=? AND ai_credit_microusd>=?
    AND EXISTS(SELECT 1 FROM content_jobs WHERE id=? AND status='queued')
    AND NOT EXISTS(SELECT 1 FROM agent_runs WHERE coin_id=coins.id AND status='reserved')
-   AND COALESCE((SELECT SUM(COALESCE(cost_microusd,reserved_microusd)) FROM agent_runs WHERE created_at>?),0)+?<=?
-   ON CONFLICT(id) DO NOTHING`).bind('content:'+job.id,ceiling,new Date(now).toISOString(),job.coin_id,ceiling,job.id,day,ceiling,cap),
+   ON CONFLICT(id) DO NOTHING`).bind('content:'+job.id,ceiling,new Date(now).toISOString(),job.coin_id,ceiling,job.id),
   db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd-? WHERE id=? AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved') AND EXISTS(SELECT 1 FROM content_jobs WHERE id=? AND status='queued')").bind(ceiling,job.coin_id,'content:'+job.id,job.id),
   db().prepare("UPDATE content_jobs SET status='reserved',next_attempt_at=0,quote=?,user_id=?,reserved_microusd=?,updated_at=? WHERE id=? AND status='queued' AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved')").bind(quote?JSON.stringify(quote):null,account?.user_id??null,ceiling,now,job.id,'content:'+job.id),
  ]);return !!result[0].meta.changes;

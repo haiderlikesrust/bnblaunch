@@ -35,13 +35,11 @@ Generate each secret separately with `openssl rand -hex 32`. Do not reuse a toke
 | --- | --- |
 | `OPENROUTER_API_KEY` | Inference key for the launchpad's single shared OpenRouter account |
 | `OPENROUTER_MANAGEMENT_KEY` | Management key for that same account, used to verify prepaid credit collateral |
-| `AGENT_DAILY_LIMIT_MICROUSD` | Platform-wide AI spending ceiling; `1000000` = $1. Zero disables paid planning. This is not a creator budget. |
 | `CHAT_DAILY_LIMIT_MICROUSD` | Platform-wide paid Q&A ceiling, also in micro-USD; zero disables paid chat |
 | `BRAVE_API_KEY` | Brave Search API subscription key |
 | `BRAVE_COST_MICROUSD` | Your contracted maximum charge for one Brave query, in micro-USD |
 | `SIGNER_GAS_RESERVE_WEI` | Preset agent gas reserve; template is `2000000000000000` (0.002 BNB) |
 | `SIGNER_MAX_GAS_PRICE_WEI` | Preset maximum gas price; template is `3000000000` (3 gwei) |
-| `SIGNER_DAILY_SPEND_BPS` | Maximum fraction of confirmed treasury resources spent in a rolling day; template `7500` = 75%. The agent chooses actual spending within this ceiling. |
 | `SIGNER_SLIPPAGE_BPS` | Swap slippage ceiling; template `100` = 1% |
 | `SIGNER_BUYBACKS_ENABLED` | Explicit platform enablement for buybacks; keep false until the chain routes have been validated |
 | `TWITTERAPI_IO_KEY` | Funded TwitterAPI.io provider key; creators connect their own project accounts on coin pages |
@@ -53,7 +51,7 @@ Generate each secret separately with `openssl rand -hex 32`. Do not reuse a toke
 | `PORKBUN_API_KEY`, `PORKBUN_SECRET_KEY` | Domain provider account; unattended purchase/DNS is not enabled yet |
 | `RELAY_API_KEY` | Relay access, if required for your account; automatic provider funding is not enabled yet |
 
-The template leaves paid AI ceilings at zero. Set your platform allowances deliberately after loading provider credits. None of these policy fields is exposed to coin developers. Developer language, mission and model choices are saved at creation and do not grant signing permissions.
+The template leaves visitor Q&A disabled until its separate allowance is configured. Agent operations have no daily monetary ceiling and require funded provider accounts plus available per-coin credit. None of these policy fields is exposed to coin developers. Developer language, mission and model choices are saved at creation and do not grant signing permissions.
 
 ## Current operational boundary
 
@@ -63,9 +61,9 @@ The worker implements confirmed treasury observation, central-compute collateral
 
 ## X and image setup
 
-Fund the platform's TwitterAPI.io and OpenRouter accounts, set the X key/proxy and the separate session encryption key, then enable the platform spending ceiling. For each coin with community updates, its creator connects an existing X account on the private coin page. The form explicitly authorizes one public verification post. SHEN confirms its immutable author ID before binding the account. Passwords and TOTP setup secrets are not persisted. The same X identity can refresh an expired session; it cannot be swapped for another account after binding. SHEN does not create X accounts.
+Fund the platform's TwitterAPI.io and OpenRouter accounts, set the X key/proxy and the separate session encryption key, then configure the X onboarding allowance. For each coin with community updates, its creator connects an existing X account on the private coin page. The form explicitly authorizes one public verification post. SHEN confirms its immutable author ID before binding the account. Passwords and TOTP setup secrets are not persisted. The same X identity can refresh an expired session; it cannot be swapped for another account after binding. SHEN does not create X accounts.
 
-After confirmed launch and funding, a guarded agent plan can enqueue text, an image post, or gallery artwork. A job reserves the image quote and applicable X charges against its coin's operating credit and the platform allowance. Image generation uses the same OpenRouter account as reasoning, with a pinned supported image provider, one 1K square image per job, and actual response cost settlement. Completed gallery images and confirmed X posts appear in the Community tab. Pending results are visibly marked.
+After confirmed launch and funding, a guarded agent plan can enqueue text, an image post, or gallery artwork. A job reserves the image quote and applicable X charges against its coin's available operating credit. Image generation uses the same OpenRouter account as reasoning, with a pinned supported image provider, one 1K square image per job, and actual response cost settlement. Completed gallery images and confirmed X posts appear in the Community tab. Pending results are visibly marked.
 
 The queue limits publishing to one job per hour and eight per rolling day per coin. It persists each write's state before calling a provider. A timed-out X post is checked against the expected author, content, time and attachment identity; missing evidence is held for review. Generation/upload timeouts and unknown billing also hold reservations. There is no automatic retry of an ambiguous paid write or public-post control for creators. Verify provider records before any manual reconciliation.
 
@@ -97,3 +95,11 @@ docker compose -f compose.dokploy.yaml config --quiet
 GitHub Actions builds the production gateway, app, PostgreSQL and signer images against disposable settings, then checks pages, assets, database writes, signed wallet authentication, replay rejection and launch gates through Nginx. It does not fund wallets or make paid provider calls. The local Docker daemon must be running for container checks.
 
 References: [Dokploy Compose](https://docs.dokploy.com/docs/core/docker-compose), [domain routing](https://docs.dokploy.com/docs/core/docker-compose/domains), [OpenRouter images](https://openrouter.ai/docs/guides/overview/multimodal/image-generation), [TwitterAPI.io contracts](https://docs.twitterapi.io/api-reference/openapi.json), [OpenRouter crypto funding status](https://openrouter.ai/docs/cookbook/administration/crypto-api).
+
+## Agent websites and spending
+
+The worker creates the initial website during a funded, approved planning cycle and publishes it at `https://shen.now/sites/<coin-id>`. The same gateway and app serve these pages; no additional DNS, hosting key or deployment per coin is needed. Revisions are persisted in PostgreSQL, committed under the worker lease and shown in the coin’s Website tab. Failed or rejected updates retain the last published revision. Existing `/coin/<coin-id>` links redirect after publication.
+
+Agent operations have no fixed daily monetary cap. The removed `AGENT_DAILY_LIMIT_MICROUSD` and `SIGNER_DAILY_SPEND_BPS` variables are ignored and can be deleted from saved environments. Confirmed spendable funds, gas, per-call reservations, provider collateral and transaction validation still apply. Visitor Q&A and X onboarding retain their separate limits. Pacing uses market cap, liquidity, volume, recent settled service costs and observed fee-distribution rates. FDV is kept distinct from market cap; missing/stale data remains explicit. Fee history starts from a baseline, excludes deposits and pending fees, and resets after routing changes, reorganizations or observation gaps beyond the bounded verification window.
+
+Custom-domain purchase, renewal, automatic registrar funding and domain/HTTPS provisioning remain unimplemented. Porkbun API keys alone do not activate them. The current BNB-only signer cannot execute Base USDC/x402 payments or bridge requests. A shared registrar account can be funded through crypto checkout, but that does not by itself wire domain purchases into the agent.

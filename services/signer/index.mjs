@@ -15,13 +15,13 @@ if(webToken.length<40||workerToken.length<40||webToken===workerToken) throw Erro
 const rpc=required('BNB_RPC_URL');if(new URL(rpc).protocol!=='https:') throw Error('BNB_RPC_URL must use HTTPS');
 const settlementAddress=required('SIGNER_SETTLEMENT_ADDRESS');
 if(!isAddress(settlementAddress)||settlementAddress.toLowerCase()===zeroAddress) throw Error('Invalid settlement address');
-const dailySpendBps=Number(positive('SIGNER_DAILY_SPEND_BPS')),slippageBps=Number(positive('SIGNER_SLIPPAGE_BPS'));
-if(dailySpendBps>10000||slippageBps>300) throw Error('Daily spend must be <=10000 bps; slippage <=300 bps');
+const slippageBps=Number(positive('SIGNER_SLIPPAGE_BPS'));
+if(slippageBps>300) throw Error('Slippage must be <=300 bps');
 const storePath=resolve(env.SIGNER_DB_PATH??'/data/signer.sqlite');
 mkdirSync(dirname(storePath),{recursive:true,mode:0o700});
 const store=new WalletStore(storePath,required('SIGNER_MASTER_KEY'));
 const client=createPublicClient({chain:bsc,transport:http(rpc,{timeout:12000,retryCount:1})});
-const engine=new SigningEngine(store,client,{settlementAddress,dailySpendBps,slippageBps,gasReserveWei:positive('SIGNER_GAS_RESERVE_WEI'),maxGasPriceWei:positive('SIGNER_MAX_GAS_PRICE_WEI'),buybacksEnabled:env.SIGNER_BUYBACKS_ENABLED==='true'});
+const engine=new SigningEngine(store,client,{settlementAddress,slippageBps,gasReserveWei:positive('SIGNER_GAS_RESERVE_WEI'),maxGasPriceWei:positive('SIGNER_MAX_GAS_PRICE_WEI'),buybacksEnabled:env.SIGNER_BUYBACKS_ENABLED==='true'});
 function send(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(value));}
 async function body(req){let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>8192) throw Error('Request too large');}return JSON.parse(raw);}
 function exact(value,keys){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k))) throw Error('Unsupported request fields');}

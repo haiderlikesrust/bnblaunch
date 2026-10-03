@@ -14,7 +14,6 @@ declare namespace Cloudflare {
     SIGNER_WEB_TOKEN?: string;
     SIGNER_SETTLEMENT_ADDRESS?: string;
     OPENROUTER_MANAGEMENT_KEY?: string;
-    AGENT_DAILY_LIMIT_MICROUSD?: string;
     BRAVE_COST_MICROUSD?: string;
     TWITTERAPI_IO_KEY?: string;
     TWITTERAPI_IO_PROXY?: string;

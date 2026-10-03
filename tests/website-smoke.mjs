@@ -1,0 +1,23 @@
+// Disposable local HTTP/visual fixture. Never run against a production database.
+import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+const origin='http://localhost:5173',record='.wrangler/website-qa.json';
+function execute(sql){writeFileSync('.wrangler/website-qa.sql',sql);const result=spawnSync(process.execPath,['--import','./scripts/sites-env.mjs','./node_modules/wrangler/bin/wrangler.js','d1','execute','DB','--local','--config','wrangler.local.json','--persist-to','.wrangler/state','--file','.wrangler/website-qa.sql'],{encoding:'utf8'});assert.equal(result.status,0,result.stderr)}
+const quote=v=>"'"+String(v).replaceAll("'","''")+"'";
+if(process.argv[2]==='cleanup'){
+ const {id}=JSON.parse(readFileSync(record,'utf8'));assert.match(id,/^[0-9a-f-]{36}$/);execute(`DELETE FROM site_revisions WHERE coin_id=${quote(id)} AND EXISTS(SELECT 1 FROM coins WHERE id=${quote(id)} AND owner='local-website-qa'); DELETE FROM events WHERE coin_id=${quote(id)} AND owner='local-website-qa'; DELETE FROM coins WHERE id=${quote(id)} AND owner='local-website-qa';`);assert.equal((await fetch(origin+'/sites/'+id)).status,404);console.log('Disposable site removed.');
+}else{
+ const id=randomUUID(),now=Date.now(),address='0x'+randomUUID().replaceAll('-','')+'11117777';
+ const coin={id,name:'Qing',symbol:'QING',description:'A curious community on BNB.',purpose:'Document verified progress.',language:'en',threshold:.1,balance:.2,treasury:100,taxRate:3,holders:0,burn:0,liquidity:0,dailyBudget:0,reserve:0,state:'active',website:true,social:false,research:false,images:false,buyback:false,tokenAddress:address,imageUrl:'/shen-symbol.png'};
+ const site={title:'A little curiosity. A mind of its own.',tagline:'Meet Qing. An independent agent exploring ideas, sharing what it learns, and growing alongside its community.',about:'Qing began with a simple idea: a community deserves a curious, consistent voice. Its agent researches public information, explains what it finds, and records its decisions in the open.\n\nA purpose set at launch. A mind that keeps moving.',theme:'jade',layout:'editorial',sections:[{heading:'Curiosity, with a direction.',body:'Research begins with questions. The agent follows its mission, checks public sources, and shares the context behind what it learns.'},{heading:'A record you can follow.',body:'The agent documents its work. Read its activity, inspect the treasury, and follow the decisions behind each update.'}],faq:[{question:'Who controls the agent?',answer:'The creator sets the purpose at launch. After that, the agent makes its own operational decisions.'},{question:'How is the work funded?',answer:'Distributable trading fees fund the treasury. Service costs are covered before other spending.'},{question:'Can a visitor inject code?',answer:'<script data-agent-xss>alert(1)</script>'}]};
+ writeFileSync(record,JSON.stringify({id}));
+ execute(`INSERT INTO coins(id,owner,config,created_at,updated_at) VALUES(${quote(id)},'local-website-qa',${quote(JSON.stringify(coin))},${quote(new Date(now).toISOString())},${quote(new Date(now).toISOString())}); INSERT INTO site_revisions(id,coin_id,revision,content,published_at) VALUES(${quote(id)},${quote(id)},1,${quote(JSON.stringify(site))},${now});`);
+ assert.equal((await fetch(origin+'/sites/'+id)).status,404,'Private draft cannot publish by storing a revision');assert.equal((await fetch(origin+'/api/coins/'+id+'/website')).status,404);
+ execute(`UPDATE coins SET token_address=${quote(address)} WHERE id=${quote(id)}; INSERT INTO events(id,coin_id,owner,name,message,created_at) VALUES(${quote(id)},${quote(id)},'local-website-qa','Qing','Published the first community website.',${quote(new Date(now).toISOString())});`);
+ const response=await fetch(origin+'/sites/'+id);assert.equal(response.status,200);const html=await response.text();assert.ok(html.includes(site.title));assert.ok(!html.includes('<script data-agent-xss>'));assert.ok(html.includes('&lt;script data-agent-xss&gt;'));
+ const status=await (await fetch(origin+'/api/coins/'+id+'/website')).json();assert.equal(status.site.revision,1);assert.equal(status.site.url,'/sites/'+id);assert.equal(status.site.owner,undefined);
+ const alias=await fetch(origin+'/coin/'+id,{redirect:'manual'});assert.ok([301,302,307,308].includes(alias.status));assert.equal(alias.headers.get('location'),'/sites/'+id);
+ console.log('PASS: draft isolation, public page, escaped content, metadata and legacy redirect. Visual QA: '+origin+'/sites/'+id);
+}
