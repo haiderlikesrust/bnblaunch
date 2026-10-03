@@ -56,6 +56,9 @@ export async function runDomainTick(injected?:Dependencies){
   const next=async(status:string,delay=15000)=>update('status=?,next_attempt_at=?,last_error=NULL',status,Date.now()+delay);
   const fail=async(code:string)=>update("status='failed',reserved_cents=0,last_error=?",code);
   if(j.status==='queued'){
+   // Verify the configured hosting deployment before spending on a new name.
+   // Renewals may preserve an existing registration during a hosting outage.
+   if(j.kind==='register')await d.host.composeStatus();
    const check=await d.registrar.check(j.domain);
    if(check.premium||check.annualRenewalCents>p.maxAnnualRenewalCents){await fail('PRICE_OUTSIDE_AGENT_BUDGET');return {processed:true,reason:'domain_over_budget'};}
    const quote=await d.registrar.quote(j.domain,j.kind);
