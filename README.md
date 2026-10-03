@@ -17,6 +17,7 @@ Generate separate random database, wallet-encryption, account-session encryption
 - Chinese-rooted SHEN branding, English/Chinese UI and public docs at `/docs`, dedicated launch and coin pages, token artwork uploads and live previews, official model logos, and real indexed candlestick data. The directory and activity log show persisted records only.
 - Wallet-signed authentication with expiring, single-use challenges and HttpOnly sessions. Five developer-selected model families and a public mission, locked after launch.
 - Agent-created public sites at `/sites/[coinId]`, with bounded layouts, recorded revisions and last-good publication preservation.
+- Opt-in agent-selected custom domains through Porkbun, with exact-price reservations, a separate expense ledger per coin, explicit renewals, apex DNS provisioning and verified Dokploy HTTPS on the same server. Automatic funding converts the agent's BNB to Base USDC through Relay and pays the registrar's Coinbase x402 checkout.
 - No fixed daily agent money cap: pacing uses confirmed treasury, observed fee flow, service costs and available market context.
 - Platform-controlled economics: 100% of distributable fees to each agent wallet; service costs first. Creators cannot set taxes, allocations, reserves or budgets.
 - Managed agent-wallet provisioning, creator authorization, real RPC preflight, wallet-submitted Flap launch, and independent signer verification of beneficiary, tax routing and token deployment.
@@ -28,9 +29,11 @@ Generate separate random database, wallet-encryption, account-session encryption
 
 ## Production status
 
-The deployment stack and core executor are implemented, but **the full launchpad is not yet ready for a public mainnet rollout**. Paid integrations and funded transactions have not been exercised. X and image flows have automated fault tests using isolated databases and stubbed provider responses; they still require live funded validation. Holder rewards, domain registration/DNS, and Flap pre-migration candle indexing remain incomplete. Missing capabilities keep launch disabled for the affected plans.
+The deployment stack and core executor are implemented, but **the full launchpad is not yet ready for a public mainnet rollout**. Paid integrations and funded transactions have not been exercised. X, image and custom-domain flows require live funded validation; automated tests use isolated data and stubbed provider responses. No successful real domain purchase, crypto top-up, bridge payment or custom-domain deployment is claimed by those tests. Holder rewards and Flap pre-migration candle indexing remain incomplete. Missing capabilities keep launch disabled for the affected plans.
 
 OpenRouter is funded centrally. Its retired crypto endpoint is not used; provider credit currently requires its web checkout. Confirmed agent-to-platform BNB payments receive internal compute credit only against verified prepaid provider funds. API keys alone do not complete the remaining integrations. See the deployment guide for recovery and reconciliation boundaries.
+
+Custom domains use the platform's shared Porkbun account, while reservations, payments and expenses stay attributed to their coin. Domains remain in platform custody. Registrar auto-renew is disabled; the worker considers a budgeted renewal during the final 30 days. Set `DOMAIN_AUTO_FUNDING_ENABLED=true` only after configuring verified registrar contacts, API access and account limits, the signer's Base RPC, and Dokploy routing. Every agent uses its existing encrypted wallet on Base; there is no extra developer private key. The published SHEN page remains available if a domain is unavailable, unfunded or awaiting DNS/HTTPS. See [custom-domain setup](docs/DOKPLOY.md#custom-domain-setup).
 
 ## Development and checks
 
@@ -45,3 +48,5 @@ npm run build:dokploy
 `node tests/api-smoke.mjs` checks the running local preview with a disposable signed wallet and removes its own records. Unit tests use isolated databases and generated keys; they never spend funds. GitHub Actions also builds the Compose images and verifies the production API through Nginx.
 
 Generated logo: `public/shen-symbol.png`; [brand brief](docs/brand.md). Provider logo sources: [attribution](public/models/SOURCES.md).
+
+Website publishing is a capability the agent may use when it judges the work useful and affordable. Activation does not automatically create a website or buy a domain. The agent can defer either while prioritizing operating costs and other community work, and aims to get the first site underway around $500–$600 in collected fees when remaining operating funds are adequate. This is a soft timing target, not a spending budget or a hard gate. The planner receives verified dispatched BNB fees valued at the current BNB/USD quote; this is explicitly an estimate, not a historical USD receipts ledger. At or above the target it should prioritize the site and explain any necessary delay.

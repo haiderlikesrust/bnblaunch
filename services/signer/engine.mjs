@@ -1,5 +1,6 @@
 import { decodeFunctionData, encodeFunctionData, getContractAddress, keccak256, parseAbi, zeroAddress } from 'viem';
 import { PORTAL, TAX_V3_IMPL, portalAbi } from '../../shared/flap-contract.mjs';
+import { hasPendingDomainBridge } from './domain-funding.mjs';
 
 const DEAD = '0x000000000000000000000000000000000000dEaD';
 const ROUTER = '0x10ED43C718714eb63d5aA57B78B54704E256024E';
@@ -80,6 +81,7 @@ export class SigningEngine {
     const row=this.store.createIntent(input),fence=this.store.acquire(row.coin_id);
     try {
       if(row.status!=='created') return await this.reconcile(row.id);
+      if(hasPendingDomainBridge(this.store,row.coin_id)) throw Error('Domain funding is pending for this wallet');
       if(row.expires_at<=Date.now()) throw Error('Unsigned intent expired');
       const pending=this.store.pending(row.coin_id);
       if(pending) {await this.reconcile(pending.id);if(this.store.pending(row.coin_id)) throw Error('Previous agent transaction is still pending');}

@@ -16,7 +16,11 @@ const site=(data)=>request(app,'/api/internal/worker',env.WORKER_TOKEN,data,true
 async function cycle(){
   const authority=await request(signer,'/v1/status',env.SIGNER_WORKER_TOKEN);
   if(!authority.signingReady||!authority.workerAuthorized||authority.chainId!==56)throw Error('Worker signing authority unavailable');
-  const {operations}=await site();
+  const {operations,domainFunding=[]}=await site();
+  for(const job of domainFunding){
+    if(stopping)break;
+    try{await request(signer,"/v1/domain-funding",env.SIGNER_WORKER_TOKEN,job);await request(signer,`/v1/domain-funding/${job.id}/tick`,env.SIGNER_WORKER_TOKEN,{});lastSuccess=Date.now();}catch{console.warn("Domain funding awaits reconciliation; its saved ID is retained.");}
+  }
   for(const op of operations){
     if(stopping)break;
     try{
@@ -28,6 +32,7 @@ async function cycle(){
     }catch{console.warn('An agent operation awaits reconciliation. Its existing ID is retained.');}
     try{await site({action:'reconcile',id:op.id});}catch{console.warn('Operation settlement is pending.');}
   }
+  await site({action:'domains'});
   await site({action:'tick'});lastSuccess=Date.now();
 }
 const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000;res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});

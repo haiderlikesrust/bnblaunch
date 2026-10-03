@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { z } from "zod";
 import { formatEther, parseEther, parseAbi, type Address } from "viem";
 import { agentModel, GUARDRAIL_MODEL } from "./agent-models";
-import { chatPrice, callCeiling, chatCompletion } from "./chat-completion";
+import { chatPrice, callCeiling, chatCompletion, PaidCompletionRejected } from "./chat-completion";
 import { AppError, db, type CoinRow } from "./server";
 import { signerRequest } from "./signer";
 import { bnbPrice, computeCapacity } from "./funding";
@@ -14,7 +14,9 @@ import { validatePublication } from './content-policy';
 import { marketContext } from './market';
 import { treasuryFlow } from './treasury-flow';
 import { publishedWebsite, websiteStatements } from './websites';
+import { domainSnapshot, domainOrderStatement, domainsConfigured } from './domain-runtime';
 import { boundedPlanningContext } from './planning-context';
+import { websiteTiming } from './website-timing';
 const PLANNER_OUTPUT_TOKENS=2200;
 
 type Lease={coinId:string;id:string};
@@ -27,9 +29,9 @@ export async function requireWorker(request:Request){
 }
 export async function runtimeCapabilities(){
   if(!env.OPENROUTER_API_KEY||!env.OPENROUTER_MANAGEMENT_KEY)return [];
-  const [signer,capacity]=await Promise.all([signerRequest<{chainId:number;signingReady:boolean;settlementAddress:string}>("/v1/status"),computeCapacity()]);
+  const [signer,capacity]=await Promise.all([signerRequest<{chainId:number;signingReady:boolean;settlementAddress:string;domainFundingEnabled?:boolean}>("/v1/status"),computeCapacity()]);
   if(signer.chainId!==56||!signer.signingReady||signer.settlementAddress?.toLowerCase()!==env.SIGNER_SETTLEMENT_ADDRESS?.toLowerCase()||capacity.available<=0||capacity.available<capacity.liability)return [];
-  return ["funding-reconciliation","cost-reservations","autonomous-planning","transaction-execution","website-publishing",...await contentCapabilities(),...(env.BRAVE_API_KEY&&Number(env.BRAVE_COST_MICROUSD)>0?["brave-research"]:[])];
+  return ["funding-reconciliation","cost-reservations","autonomous-planning","transaction-execution","website-publishing",...(domainsConfigured()&&signer.domainFundingEnabled?["custom-domains"]:[]),...await contentCapabilities(),...(env.BRAVE_API_KEY&&Number(env.BRAVE_COST_MICROUSD)>0?["brave-research"]:[])];
 }
 async function acquire():Promise<Lease|null>{
   const now=Date.now();
@@ -86,6 +88,7 @@ export async function runAgentTick(capabilities?:string[]){
     if(!active)return {processed:true,reason:"awaiting_treasury_funding"};
     if(await db().prepare("SELECT id FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast')").bind(coin.id).first())return {processed:true,reason:"transaction_pending"};
     if(await db().prepare("SELECT id FROM agent_runs WHERE coin_id=? AND status='reserved'").bind(coin.id).first())return {processed:true,reason:"provider_cost_reconciliation_required"};
+    if(await db().prepare("SELECT id FROM domain_orders WHERE coin_id=? AND status IN ('queued','funding','reserve','purchase','review')").bind(coin.id).first())return {processed:true,reason:'domain_payment_pending'};
     const prices=await Promise.all([chatPrice(agentModel(coin.modelId).id),chatPrice(GUARDRAIL_MODEL)]);
     const researchCost=coin.research?Number(env.BRAVE_COST_MICROUSD):0;
     if(coin.research&&(!Number.isSafeInteger(researchCost)||researchCost<=0||!env.BRAVE_API_KEY))throw new AppError(412,"Brave billing must be configured before research.");
@@ -106,12 +109,14 @@ export async function runAgentTick(capabilities?:string[]){
       await queue(lease,"compute",amount.toString(),"Prepay metered agent services from treasury.",{reserve:fundingReserve,capacity:capacity.available});return {processed:true,reason:"service_payment_queued"};
     }
     const tokenBalance=await chainClient().readContract({address:coin.tokenAddress as Address,abi:parseAbi(["function balanceOf(address) view returns(uint256)"]),functionName:"balanceOf",args:[wallet.address as Address]});
-    const [community,market,hosted,costs]=await Promise.all([contentSnapshot(coin),marketContext(row.token_address!),publishedWebsite(coin.id),db().prepare(`SELECT
+    const [community,market,hosted,costs,domains]=await Promise.all([contentSnapshot(coin),marketContext(row.token_address!),publishedWebsite(coin.id),db().prepare(`SELECT
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
       (SELECT COALESCE(SUM(cost_microusd),0) FROM chat_runs WHERE coin_id=? AND status='settled' AND created_at>?) AS hour,
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
       (SELECT COALESCE(SUM(cost_microusd),0) FROM chat_runs WHERE coin_id=? AND status='settled' AND created_at>?) AS day`)
-      .bind(coin.id,new Date(Date.now()-3600000).toISOString(),coin.id,Date.now()-3600000,coin.id,new Date(Date.now()-86400000).toISOString(),coin.id,Date.now()-86400000).first<{hour:number;day:number}>()]);
+      .bind(coin.id,new Date(Date.now()-3600000).toISOString(),coin.id,Date.now()-3600000,coin.id,new Date(Date.now()-86400000).toISOString(),coin.id,Date.now()-86400000).first<{hour:number;day:number}>(),domainSnapshot(coin.id,coin.website&&capabilities.includes("custom-domains"))]);
+    const websiteQuote=coin.website&&!hosted?await bnbPrice().catch(()=>null):null;
+    const siteTiming=websiteTiming(feeFlow.lifetimeDistributedWei,websiteQuote?.answer);
     const run=await reserve(lease,ceiling);
     // Any ambiguous provider failure keeps its reservation. Non-billable chain
     // preflight is complete before reserving, so known local failures don't lock credit.
@@ -119,16 +124,22 @@ export async function runAgentTick(capabilities?:string[]){
     // Project bounded facts, not full old image prompts or entire site copies.
     const communityContext={...community,recent:community.recent.map(j=>({status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
     const previousSite=hosted?{title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
-    const snapshot={name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,canPublishWebsite:coin.website,needsWebsite:coin.website&&!hosted,sources,community:communityContext,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
+    const snapshot={domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
     const system=PLANNER_RULES+" Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
     let bounded;
     try{bounded=boundedPlanningContext(system,snapshot)}catch(error){await settle(coin.id,run,researchCost,'Essential planning context exceeded the local input bound.');throw error;}
     let result;
-    try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS);}catch(error){if(error instanceof AppError&&error.status===413)await settle(coin.id,run,researchCost,'Planning context exceeded the local input bound.');throw error;}
+    try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS);}catch(error){
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return {processed:true,reason:'plan_rejected'};}
+      if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,researchCost,'Planner request rejected before dispatch.');throw error;
+    }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(plan.transaction.kind==="buyback"&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return {processed:true,reason:"plan_rejected"};}
+    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(plan.transaction.kind==="buyback"&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return {processed:true,reason:"plan_rejected"};}
     let guard;
-    try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},800,64000);}catch(error){if(error instanceof AppError&&error.status===413)await settle(coin.id,run,result.cost+researchCost,'Guard context exceeded the local input bound.');throw error;}
+    try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},800,64000);}catch(error){
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return {processed:true,reason:'plan_rejected'};}
+      if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,result.cost+researchCost,'Guard request rejected before dispatch.');throw error;
+    }
     let decoded:unknown;try{decoded=JSON.parse(guard.text)}catch{decoded=null}
     const verdict=z.object({allow:z.boolean(),reason:z.string().max(1000)}).strict().safeParse(decoded);
     await settle(coin.id,run,result.cost+guard.cost+researchCost,JSON.stringify(plan));
@@ -142,6 +153,7 @@ export async function runAgentTick(capabilities?:string[]){
       db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(run.id,coin.id,row.owner,coin.name,plan.summary,new Date().toISOString(),coin.id,lease.id,now),
       ...(plan.publication?[contentJobStatement(lease,run.id,plan.publication)]:[]),
       ...(coin.website&&plan.website?websiteStatements(lease,run.id,plan.website,now):[]),
+      ...(coin.website&&plan.domain?[domainOrderStatement(lease,run.id,plan.domain,now)]:[]),
     ]);
     if(!saved[0].meta.changes)throw new AppError(409,"Agent planning lease expired.");
     if(plan.transaction.kind!=="none")await queue(lease,plan.transaction.kind,plan.transaction.amountWei,plan.transaction.reason);

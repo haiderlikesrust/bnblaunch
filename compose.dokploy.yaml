@@ -50,7 +50,11 @@ services:
       X_READ_COST_MICROUSD: ${X_READ_COST_MICROUSD:-5000}
       PORKBUN_API_KEY: ${PORKBUN_API_KEY:-}
       PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:-}
-      RELAY_API_KEY: ${RELAY_API_KEY:-}
+      DOMAIN_AUTO_FUNDING_ENABLED: ${DOMAIN_AUTO_FUNDING_ENABLED:-false}
+      DOKPLOY_URL: ${DOKPLOY_URL:-}
+      DOKPLOY_API_KEY: ${DOKPLOY_API_KEY:-}
+      DOKPLOY_COMPOSE_ID: ${DOKPLOY_COMPOSE_ID:-}
+      HOSTING_IPV4: ${HOSTING_IPV4:-}
     networks: [app, database, signing]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -109,6 +113,11 @@ services:
       SIGNER_MAX_GAS_PRICE_WEI: ${SIGNER_MAX_GAS_PRICE_WEI:?Set gas-price ceiling}
       SIGNER_SLIPPAGE_BPS: ${SIGNER_SLIPPAGE_BPS:?Set swap slippage}
       SIGNER_BUYBACKS_ENABLED: ${SIGNER_BUYBACKS_ENABLED:-false}
+      DOMAIN_AUTO_FUNDING_ENABLED: ${DOMAIN_AUTO_FUNDING_ENABLED:-false}
+      BASE_RPC_URL: ${BASE_RPC_URL:-}
+      PORKBUN_API_KEY: ${PORKBUN_API_KEY:-}
+      PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:-}
+      RELAY_API_KEY: ${RELAY_API_KEY:-}
     networks: [signing]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

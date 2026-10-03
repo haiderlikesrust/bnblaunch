@@ -1,5 +1,22 @@
 {
- "name":"shen-agent-signer","private":true,"type":"module","engines":{"node":">=22.13.0"},
- "scripts":{"start":"node index.mjs","test":"node --test store.test.mjs"},
- "dependencies":{"viem":"2.57.2"}
+ "name": "shen-agent-signer",
+ "private": true,
+ "type": "module",
+ "engines": {
+  "node": ">=22.13.0"
+ },
+ "scripts": {
+  "start": "node index.mjs",
+  "test": "node --test store.test.mjs domain-funding.test.mjs"
+ },
+ "dependencies": {
+  "@relay-protocol/settlement-sdk": "0.0.144",
+  "viem": "2.57.2"
+ },
+ "overrides": {
+  "viem": "$viem",
+  "axios": "1.20.0",
+  "toml": "4.2.0",
+  "jayson": "5.0.0"
+ }
 }

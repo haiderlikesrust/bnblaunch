@@ -5,12 +5,14 @@ import { signerRequest } from "@/lib/signer";
 import { settleComputePayment } from "@/lib/funding";
 import { chainClient } from "@/lib/providers";
 import type { Hex } from "viem";
+import { domainFundingRequests, runDomainTick } from '@/lib/domain-runtime';
 import { runContentTick } from '@/lib/content-runtime';
 
-export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast') ORDER BY created_at LIMIT 20").all();return response({operations:ops.results});}catch(e){return failure(e)}}
-const payload=z.discriminatedUnion("action",[z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
+export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast') ORDER BY created_at LIMIT 20").all();return response({operations:ops.results,domainFunding:await domainFundingRequests()});}catch(e){return failure(e)}}
+const payload=z.discriminatedUnion("action",[z.object({action:z.literal("domains")}).strict(),z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
 export async function POST(request:Request){try{
   await requireWorker(request);const input=payload.parse(await body(request));
+  if(input.action==="domains")return response(await runDomainTick());
   if(input.action==="tick"){const capabilities=await refreshRuntimeHealth();if(!capabilities.includes('autonomous-planning'))return response({processed:false,reason:'runtime_configuration_required'});const content=await runContentTick();return response(content.processed?content:await runAgentTick(capabilities));}
   const op=await db().prepare("SELECT * FROM agent_operations WHERE id=?").bind(input.id).first<{id:string;coin_id:string;kind:string;amount_wei:string;status:string;created_at:number;expires_at:number}>();
   if(!op)throw new AppError(404,"Operation not found.");

@@ -1,0 +1,1 @@
+ALTER TABLE `domain_orders` ADD `minimum_credit_cents` integer DEFAULT 0 NOT NULL;

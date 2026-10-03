@@ -25,7 +25,7 @@ function fixture(){
  sql.prepare('INSERT INTO coins(id,owner,config,token_address,treasury_address,created_at,updated_at,ai_credit_microusd) VALUES(?,?,?,?,?,?,?,?)').run('coin','owner',JSON.stringify(coin),token,wallet,new Date(now).toISOString(),new Date(now).toISOString(),1000000);
  globalThis.__plannerChain={getChainId:async()=>56,getBlock:async()=>({number:100n,hash:'0x'+'a'.repeat(64),timestamp:BigInt(Math.floor(Date.now()/1000))}),readContract:async({functionName})=>{
   const values={balanceOf:0n,taxProcessor:processor,taxToken:token,marketAddress:wallet,weth:'0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',feeConfigV2:{isWeth:true,marketBps:10000,lpBps:0,dividendBps:0,deflationBps:0},totalQuoteSentToMarketing:1000000n,marketQuoteBalance:5n,decimals:8,latestRoundData:[1n,60000000000n,0n,BigInt(Math.floor(Date.now()/1000)),1n]};if(!(functionName in values))throw Error(functionName);return values[functionName];}};
- let expiry=false,reject=false,fail=false,output=plan;const calls=[];
+ let expiry=false,reject=false,fail=false,output=plan,modifyReply=(reply)=>reply;const calls=[];
  const json=v=>new Response(JSON.stringify(v));
  globalThis.fetch=async(url,init={})=>{const u=String(url);
   if(u.endsWith('/balance'))return json({address:wallet,tokenAddress:token,balanceWei:'1000000000000000000',observedAt:now,block:'100'});
@@ -33,22 +33,40 @@ function fixture(){
   if(u.endsWith('/v1/models'))return json({data:[...new Set([DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL])].map(id=>({id,pricing:{prompt:'0.000001',completion:'0.000001'},supported_parameters:['response_format']}))});
   if(u.endsWith('/v1/credits'))return json({data:{total_credits:100000,total_usage:0}});
   if(u.includes('geckoterminal'))return json({data:{id:'bsc_'+token,attributes:{address:token,market_cap_usd:'42000',fdv_usd:'50000',price_usd:'.01',total_reserve_in_usd:'5000',volume_usd:{h24:'900'}},relationships:{top_pools:{data:[]}}}});
-  if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}})}
+  if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json(modifyReply({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}},guard))}
   throw Error('Unexpected external call '+u);
  };
- return {sql,calls,coin,expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
+ return {sql,calls,coin,expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
 }
 test('funded planner has no daily money cap, receives market/fee/cost context and publishes a real site',async()=>{
  const f=fixture();try{
   f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,cost_microusd,created_at) VALUES('past','coin','plan','settled',0,9000000000,?)").run(new Date().toISOString());
   const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');
-  const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.spending.dailyMonetaryLimit,null);assert.equal(Number(snapshot.spending.serviceCostMicrousd.lastHour),9000000000);assert.equal(snapshot.spending.market.valuation.marketCapUsd,42000);assert.equal(snapshot.spending.feeFlow.status,'baseline');assert.equal(snapshot.needsWebsite,true);assert.equal(f.calls[0].max_tokens,2200);
+  const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.spending.dailyMonetaryLimit,null);assert.equal(Number(snapshot.spending.serviceCostMicrousd.lastHour),9000000000);assert.equal(snapshot.spending.market.valuation.marketCapUsd,42000);assert.equal(snapshot.spending.feeFlow.status,'baseline');assert.equal(snapshot.hasPublishedWebsite,false);assert.equal(f.calls[0].max_tokens,2200);
   const live=await publishedWebsite('coin');assert.equal(live.site.title,site.title);assert.equal(live.site.url,'/sites/coin');assert.equal(live.site.revision,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,999800);
   f.due();await runAgentTick(['autonomous-planning']);assert.equal((await publishedWebsite('coin')).site.revision,1,'identical content does not create another revision');
  }finally{f.close()}
 });
 test('a rejected update or ambiguous provider failure preserves the last committed site',async()=>{
  const f=fixture();try{await runAgentTick(['autonomous-planning']);f.due();f.output({...plan,website:{...site,title:'Unverified replacement'}});f.reject();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal((await publishedWebsite('coin')).site.title,site.title);f.due();f.fail();await assert.rejects(runAgentTick(['autonomous-planning']));assert.equal((await publishedWebsite('coin')).site.revision,1)}finally{f.close()}
+});
+test('a funded first plan can defer publishing its website',async()=>{
+ const f=fixture();try{f.output({...plan,website:null});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(await publishedWebsite('coin'),null);const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.canPublishWebsite,true);assert.equal(snapshot.hasPublishedWebsite,false);assert.equal(snapshot.websiteTiming.priority,'growing');}finally{f.close()}
+});
+for(const rejectGuard of [false,true])test(`a truncated ${rejectGuard?'guard':'planner'} response settles its verified cost and allows the next plan`,async()=>{
+ const f=fixture();try{
+  f.modifyReply((reply,guard)=>{if(guard===rejectGuard)reply.choices[0].finish_reason='length';return reply});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(f.calls.length,rejectGuard?2:1);assert.equal(await publishedWebsite('coin'),null);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
+  const run=f.sql.prepare('SELECT status,cost_microusd FROM agent_runs').get();assert.equal(run.status,'settled');assert.equal(run.cost_microusd,rejectGuard?200:100);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000-run.cost_microusd);
+  f.modifyReply(reply=>reply);f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal((await publishedWebsite('coin')).site.revision,1);
+ }finally{f.close()}
+});
+for(const invalid of ['missing','negative','unsafe','over-ceiling'])test(`a ${invalid} cost receipt keeps the planner reservation even when output is rejected`,async()=>{
+ const f=fixture();try{
+  f.modifyReply(reply=>{reply.choices[0].finish_reason='length';if(invalid==='missing')delete reply.usage;else reply.usage.cost=invalid==='negative'?-.001:invalid==='unsafe'?1e20:1;return reply});
+  await assert.rejects(runAgentTick(['autonomous-planning']),/awaiting reconciliation/);const run=f.sql.prepare('SELECT status,cost_microusd,reserved_microusd FROM agent_runs').get();assert.equal(run.status,'reserved');assert.equal(run.cost_microusd,null);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000-run.reserved_microusd);assert.equal(await publishedWebsite('coin'),null);
+  f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');assert.equal(f.calls.length,1);
+ }finally{f.close()}
 });
 test('an expired planning lease cannot publish a website',async()=>{
  const f=fixture();try{f.expire();await assert.rejects(runAgentTick(['autonomous-planning']),/lease expired/);assert.equal(await publishedWebsite('coin'),null);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0)}finally{f.close()}
@@ -69,4 +87,15 @@ test('the real funded planner and website revision transaction execute against P
   let tail=Promise.resolve();env.DB=createDatabase({async connect(){const prior=tail;let release;tail=new Promise(r=>{release=r});await prior;return {async query(sql,params){const result=await pg.query(sql,params);return {...result,rowCount:result.affectedRows??result.rows.length}},release}}});
   const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');assert.equal(Number((await publishedWebsite('coin')).site.revision),1);assert.equal((await pg.query('SELECT status FROM agent_runs')).rows[0].status,'settled');
  }finally{await pg.close();f.close()}
+});
+
+test('guarded domain proposals require capability, a site and a separate affordable budget',async()=>{
+ const f=fixture(),keys=['SHEN_RUNTIME','DOMAIN_AUTO_FUNDING_ENABLED','PORKBUN_API_KEY','PORKBUN_SECRET_KEY','DOKPLOY_URL','DOKPLOY_API_KEY','DOKPLOY_COMPOSE_ID','HOSTING_IPV4'],previous=Object.fromEntries(keys.map(k=>[k,env[k]]));
+ try{
+  Object.assign(env,{SHEN_RUNTIME:'node',DOMAIN_AUTO_FUNDING_ENABLED:'true',PORKBUN_API_KEY:'test',PORKBUN_SECRET_KEY:'test',DOKPLOY_URL:'https://deploy.test',DOKPLOY_API_KEY:'test',DOKPLOY_COMPOSE_ID:'test',HOSTING_IPV4:'8.8.4.4'});
+  const domain={domain:'curiousmind.xyz',kind:'register',maxCostCents:1200,maxAnnualRenewalCents:1500,maxBnbWei:'50000000000000000',reason:'A memorable home.'};f.output({...plan,domain});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM domain_orders').get().n,0);
+  f.due();assert.equal((await runAgentTick(['autonomous-planning','custom-domains'])).reason,'plan_completed');assert.equal(f.sql.prepare('SELECT domain,status FROM domain_orders').get().domain,domain.domain);assert.equal(f.sql.prepare('SELECT status FROM domain_orders').get().status,'queued');
+  assert.equal(agentPlan.safeParse({...plan,domain:{...domain,recipient:'0xbad'}}).success,false);
+ }finally{for(const key of keys){if(previous[key]===undefined)delete env[key];else env[key]=previous[key];}f.close()}
 });

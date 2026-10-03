@@ -25,6 +25,11 @@ declare namespace Cloudflare {
     CHAT_DAILY_LIMIT_MICROUSD?: string;
     PORKBUN_API_KEY?: string;
     PORKBUN_SECRET_KEY?: string;
+    DOMAIN_AUTO_FUNDING_ENABLED?: string;
+    DOKPLOY_URL?: string;
+    DOKPLOY_API_KEY?: string;
+    DOKPLOY_COMPOSE_ID?: string;
+    HOSTING_IPV4?: string;
     RELAY_API_KEY?: string;
   }
 }

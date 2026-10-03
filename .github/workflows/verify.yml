@@ -28,8 +28,9 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix services/signer --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck
-      - run: node --experimental-strip-types --test tests/*.test.mjs services/signer/store.test.mjs
+      - run: node --experimental-strip-types --test tests/*.test.mjs services/signer/*.test.mjs
       - run: docker compose -p shen-ci -f compose.dokploy.yaml -f compose.ci.yaml config --quiet
       - name: Build and start production services
         run: |

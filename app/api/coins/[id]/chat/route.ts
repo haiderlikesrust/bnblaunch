@@ -3,7 +3,7 @@ import { type Coin } from "@/lib/model";
 import { agentModel, GUARDRAIL_MODEL } from "@/lib/agent-models";
 import { chatInput, CHAT_REFUSAL, guardedAnswer, obviousInstruction } from "@/lib/chat-policy";
 import { chatSnapshot } from "@/lib/public-coin";
-import { chatCompletion, chatPrice, callCeiling } from "@/lib/chat-completion";
+import { chatCompletion, chatPrice, callCeiling, PaidCompletionRejected } from "@/lib/chat-completion";
 import { reserveChat, settleChat } from "@/lib/chat-meter";
 import { availability } from "@/lib/chat-availability";
 import { getUser } from "@/lib/auth";
@@ -35,14 +35,17 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
   if(!window.open||!window.closesAt)return response({error:"Chat is currently closed to conserve service funds. The next session depends on available funding.",window},423);
   const [guard,answer]=await Promise.all([chatPrice(GUARDRAIL_MODEL),chatPrice(agentModel(coin.modelId).id)]);
   const reservation=await reserveChat(coin.id,viewer,callCeiling(guard)*2+callCeiling(answer),window.closesAt);
-  let cost=0;
+  let cost=0,unresolvedProviderCall=false;
   // No agent executor, action adapters, transcripts, tools or caller-provided roles enter this path.
-  // On timeouts/malformed responses the reservation stays held for provider reconciliation.
+  // Unknown provider costs retain the reservation. Verified rejected output is
+  // charged and never reaches an answer or any autonomous action.
   const ensureOpen=async()=>{const fresh=await db().prepare("SELECT * FROM coins WHERE id=?").bind(coin.id).first<CoinRow>();if(!fresh)throw new AppError(423,"Chat is closed.");const state=await availability(JSON.parse(fresh.config) as Coin,{...fresh,ai_credit_microusd:fresh.ai_credit_microusd+reservation.ceiling-cost});if(!state.open||Date.now()>=window.closesAt!)throw new AppError(423,"The chat session has ended. No agent action was taken.")};
   let result;
   try{result=await guardedAnswer(message,chatSnapshot(coin),coin.language,async(kind,system,data)=>{
-   await ensureOpen();const completion=await chatCompletion(kind==="answer"?answer:guard,system,data);cost+=completion.cost;return completion.text;
-  });await ensureOpen()}catch(e){if(e instanceof AppError&&e.status===423)await settleChat(reservation,cost);throw e}
+   await ensureOpen();unresolvedProviderCall=true;
+   try{const completion=await chatCompletion(kind==="answer"?answer:guard,system,data);unresolvedProviderCall=false;cost+=completion.cost;return completion.text;}
+   catch(e){if(e instanceof PaidCompletionRejected){unresolvedProviderCall=false;cost+=e.cost;}else if(e instanceof AppError&&(e.status===413||e.status===412))unresolvedProviderCall=false;throw e;}
+  });await ensureOpen()}catch(e){if(!unresolvedProviderCall)await settleChat(reservation,cost);throw e}
   await settleChat(reservation,cost);
   return response({...result,model:agentModel(coin.modelId).name});
  }catch(e){return failure(e)}

@@ -2,7 +2,9 @@ import { createServer } from 'node:http';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createPublicClient, http, isAddress, zeroAddress } from 'viem';
-import { bsc } from 'viem/chains';
+import { bsc, base } from 'viem/chains';
+import { getOrderId } from '@relay-protocol/settlement-sdk';
+import { DomainFunding } from './domain-funding.mjs';
 import { WalletStore, authenticate } from './store.mjs';
 import { SigningEngine } from './engine.mjs';
 
@@ -22,6 +24,10 @@ mkdirSync(dirname(storePath),{recursive:true,mode:0o700});
 const store=new WalletStore(storePath,required('SIGNER_MASTER_KEY'));
 const client=createPublicClient({chain:bsc,transport:http(rpc,{timeout:12000,retryCount:1})});
 const engine=new SigningEngine(store,client,{settlementAddress,slippageBps,gasReserveWei:positive('SIGNER_GAS_RESERVE_WEI'),maxGasPriceWei:positive('SIGNER_MAX_GAS_PRICE_WEI'),buybacksEnabled:env.SIGNER_BUYBACKS_ENABLED==='true'});
+const domainFundingEnabled=env.DOMAIN_AUTO_FUNDING_ENABLED==='true';
+if(domainFundingEnabled&&(!env.BASE_RPC_URL||new URL(env.BASE_RPC_URL).protocol!=='https:'||!env.PORKBUN_API_KEY||!env.PORKBUN_SECRET_KEY))throw Error('Domain funding requires HTTPS Base RPC and Porkbun credentials');
+const baseClient=createPublicClient({chain:base,transport:http(env.BASE_RPC_URL??'https://mainnet.base.org',{timeout:12000,retryCount:1})});
+const domainFunding=new DomainFunding(store,{bnbClient:client,baseClient,getOrderId,verifyLaunch:(coinId,hash)=>engine.bindLaunch(coinId,hash)},{enabled:domainFundingEnabled,porkbunApiKey:env.PORKBUN_API_KEY,porkbunSecretKey:env.PORKBUN_SECRET_KEY,relayApiKey:env.RELAY_API_KEY,gasReserveWei:engine.policy.gasReserveWei,maxGasPriceWei:engine.policy.maxGasPriceWei});
 function send(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(value));}
 async function body(req){let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>8192) throw Error('Request too large');}return JSON.parse(raw);}
 function exact(value,keys){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k))) throw Error('Unsupported request fields');}
@@ -38,8 +44,13 @@ const server=createServer(async(req,res)=>{
   try{
     if(path==='/v1/status'&&req.method==='GET') {
       await engine.chainReady();
-      return send(res,200,{chainId:56,signingReady:true,workerAuthorized:worker,custody:'dedicated-agent-wallets',requiresDeveloperApproval:false,settlementAddress,gasReserveWei:engine.policy.gasReserveWei.toString(),buybacksEnabled:engine.policy.buybacksEnabled});
+      return send(res,200,{chainId:56,signingReady:true,domainFundingEnabled,workerAuthorized:worker,custody:'dedicated-agent-wallets',requiresDeveloperApproval:false,settlementAddress,gasReserveWei:engine.policy.gasReserveWei.toString(),buybacksEnabled:engine.policy.buybacksEnabled});
     }
+    if(path==='/v1/domain-funding'&&worker&&req.method==='POST')return send(res,200,{job:domainFunding.start(await body(req))});
+    const fundingRecord=path.match(/^\/v1\/domain-funding\/([0-9a-f-]{36})\/record$/i);
+    if(fundingRecord&&req.method==='GET')return send(res,200,{job:domainFunding.status(fundingRecord[1])});
+    const fundingTick=path.match(/^\/v1\/domain-funding\/([0-9a-f-]{36})\/tick$/i);
+    if(fundingTick&&worker&&req.method==='POST'){exact(await body(req),[]);return send(res,200,{job:await domainFunding.tick(fundingTick[1])});}
     const match=path.match(/^\/v1\/wallets\/([0-9a-f-]{36})\/(provision|launch|balance|intent)$/i);
     if(match){const [,coinId,action]=match;
       if(action==='provision'&&web&&req.method==='POST'){exact(await body(req),[]);return send(res,200,store.provision(coinId));}
