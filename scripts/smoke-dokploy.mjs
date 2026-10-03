@@ -1,8 +1,18 @@
 import assert from 'node:assert/strict';
+import {request} from 'node:http';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 assert.equal(process.env.SMOKE_TEST_FIXTURE,'true','Run only against the disposable CI database');
 const base='http://127.0.0.1:8088',origin=process.env.APP_ORIGIN;
-const platformFetch=(url,init={})=>fetch(url,{...init,headers:{...init.headers,Host:new URL(origin).host}});
+// Node fetch replaces a supplied Host with the URL authority. Use native HTTP
+// to exercise the real public hostname while connecting to the isolated gateway.
+const platformFetch=(url,init={})=>new Promise((resolve,reject)=>{
+ const req=request(url,{method:init.method??'GET',headers:{...init.headers,Host:new URL(origin).host}},res=>{
+  const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.once('error',reject);res.once('end',()=>{
+   const headers=new Headers();for(let i=0;i<res.rawHeaders.length;i+=2)headers.append(res.rawHeaders[i],res.rawHeaders[i+1]);
+   resolve(new Response([204,205,304].includes(res.statusCode)?null:Buffer.concat(chunks),{status:res.statusCode,headers}));
+  });
+ });req.once('error',reject);req.setTimeout(30000,()=>req.destroy(Error('Smoke request timed out')));req.end(init.body);
+});
 const health=await (await platformFetch(base+'/api/health')).json();assert.equal(health.ok,true);assert.equal(health.database,'postgres');
 for(const path of ['/','/launch','/agents','/activity','/signin','/docs','/shen-symbol.png','/models/glm.svg','/models/kimi.png'])assert.equal((await platformFetch(base+path)).status,200,path);
 assert.equal((await platformFetch(base+'/api/internal/worker')).status,404,'Worker API is private at gateway');
