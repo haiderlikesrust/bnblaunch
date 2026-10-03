@@ -3,9 +3,7 @@ declare namespace Cloudflare {
     DB?: D1Database;
     APP_ORIGIN?: string;
     SHEN_RUNTIME?: string;
-    BUCKET?: R2Bucket;
     OPENROUTER_API_KEY?: string;
-    OPENROUTER_MODEL?: string;
     OPENROUTER_IMAGE_MODEL?: string;
     BRAVE_API_KEY?: string;
     BNB_RPC_URL?: string;

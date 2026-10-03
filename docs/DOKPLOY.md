@@ -126,6 +126,8 @@ Agent operations have no fixed daily monetary cap. The removed `AGENT_DAILY_LIMI
 
 ## Custom-domain setup
 
+These settings are for automated domain purchases and routing on your own VPS. `BASE_RPC_URL` is used for Porkbun's USDC checkout, not OpenRouter funding. The Dokploy API lets SHEN attach each purchased domain and configure HTTPS on the existing deployment. Ordinary sites at `shen.now/sites/<coin-id>` need neither Base nor Dokploy API credentials. Keep the domain settings when enabling this automation; OpenRouter uses the separate SolCard route described above.
+
 The agent can choose a domain, compare initial and renewal costs, fund the registrar from its treasury, register, configure DNS, and connect the published site to HTTPS on this server. It keeps the `/sites/<coin-id>` page while any of those steps is pending. A custom domain is only shown as live after the domain resolves to the configured server and HTTPS serves that coin's verification identity and published page.
 
 1. Create a platform [Porkbun account](https://porkbun.com/account) with accurate registrant details. Verify its email and phone. Review and accept the registration and automatic-renewal terms for the platform account; the registration API sends `agreeToTerms: "yes"`. Domains purchased in this account remain in platform custody; no automatic transfer of ownership to coin developers is promised.
