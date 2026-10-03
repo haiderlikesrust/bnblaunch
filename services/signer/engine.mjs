@@ -1,5 +1,7 @@
+import { serviceFundingBounds } from '../../shared/service-funding.mjs';
 import { decodeFunctionData, encodeFunctionData, getContractAddress, keccak256, parseAbi, zeroAddress } from 'viem';
 import { PORTAL, TAX_V3_IMPL, portalAbi } from '../../shared/flap-contract.mjs';
+import { pendingCampaign, campaignLeg, netReceived, DEAD as BURN_SINK } from './campaigns.mjs';
 import { hasPendingDomainBridge } from './domain-funding.mjs';
 
 const DEAD = '0x000000000000000000000000000000000000dEaD';
@@ -47,13 +49,23 @@ export class SigningEngine {
     const amount=BigInt(row.amount_wei),token=wallet.token_address;
     if(row.kind==='compute') {
       if(!this.policy.settlementAddress) throw Error('Settlement recipient is not configured');
+      const bounds=serviceFundingBounds(this.policy.settlementAddress);
+      if(amount<bounds.minimumWei||amount>bounds.maximumWei)throw Error('Service payment is outside deposit limits');
       return {to:this.policy.settlementAddress,value:amount,data:'0x'};
+    }
+    if(row.kind==='reward') {
+      const leg=campaignLeg(this.store,row.id);
+      if(!leg||leg.coin_id!==row.coin_id||leg.kind!=='reward'||leg.amount_wei!==row.amount_wei||leg.campaign_status!=='running'||!leg.recipient)throw Error('Reward is not authorized by a holder snapshot');
+      const code=await this.client.getCode({address:leg.recipient,blockTag:'pending'});
+      if(code&&code!=='0x')throw Error('Reward recipient is no longer an externally owned account');
+      return {to:leg.recipient,value:amount,data:'0x'};
     }
     if(row.kind==='burn') {
       const balance=await this.client.readContract({address:token,abi:erc20,functionName:'balanceOf',args:[wallet.address]});
       if(amount>balance) throw Error('Insufficient token balance');
       return {to:token,value:0n,data:encodeFunctionData({abi:erc20,functionName:'transfer',args:[DEAD,amount]})};
     }
+    if(row.kind!=='buyback')throw Error('Unsupported signing operation');
     if(!this.policy.buybacksEnabled) throw Error('Buybacks are not enabled by platform policy');
     const state=await this.client.readContract({address:PORTAL,abi:trading,functionName:'getTokenV8Safe',args:[token]});
     if(state.tokenVersion!==6||!same(state.quoteTokenAddress,zeroAddress)||state.dexId!==0) throw Error('Unsupported token route');
@@ -63,6 +75,9 @@ export class SigningEngine {
       const quote=await this.client.simulateContract({account:wallet.address,address:PORTAL,abi:trading,functionName:'quoteExactInput',args:[{inputToken:zeroAddress,outputToken:token,inputAmount:amount}]});
       // Portal quotes already include the curve's input tax; only DEX reserve
       // quotes below need a separate output-transfer-tax deduction.
+      const probeAmount=amount/1000n||1n;
+      const probe=await this.client.simulateContract({account:wallet.address,address:PORTAL,abi:trading,functionName:'quoteExactInput',args:[{inputToken:zeroAddress,outputToken:token,inputAmount:probeAmount}]});
+      this.checkPriceImpact(amount,quote.result,probeAmount,probe.result);
       const min=quote.result*(10000n-BigInt(this.policy.slippageBps))/10000n;if(min<=0n) throw Error('Empty buy quote');
       return {to:PORTAL,value:amount,data:encodeFunctionData({abi:trading,functionName:'swapExactInput',args:[{inputToken:zeroAddress,outputToken:token,inputAmount:amount,minOutputAmount:min,permitData:'0x'}]})};
     }
@@ -74,13 +89,24 @@ export class SigningEngine {
       this.client.readContract({address:ROUTER,abi:routerAbi,functionName:'getAmountsOut',args:[amount,[WBNB,token]]}),
     ]);
     if(!same(factory,FACTORY)||!same(wrapped,WBNB)||same(pair,zeroAddress)||!same(pair,state.pool)) throw Error('Pancake V2 route is not verified');
+    const probeAmount=amount/1000n||1n;
+    const probe=await this.client.readContract({address:ROUTER,abi:routerAbi,functionName:'getAmountsOut',args:[probeAmount,[WBNB,token]]});
+    this.checkPriceImpact(amount,amounts[1],probeAmount,probe[1]);
     const min=net(amounts[1]);if(min<=0n) throw Error('Empty buy quote');
     return {to:ROUTER,value:amount,data:encodeFunctionData({abi:routerAbi,functionName:'swapExactETHForTokensSupportingFeeOnTransferTokens',args:[min,[WBNB,token],wallet.address,BigInt(Math.floor(row.expires_at/1000))]})};
+  }
+  checkPriceImpact(amount,quote,probeAmount,probeQuote){
+    const limit=BigInt(this.policy.maxPriceImpactBps??300);
+    if(quote<=0n||probeQuote<=0n||quote*probeAmount*10000n<probeQuote*amount*(10000n-limit))throw Error('Buy exceeds price-impact policy');
   }
   async execute(input) {
     const row=this.store.createIntent(input),fence=this.store.acquire(row.coin_id);
     try {
       if(row.status!=='created') return await this.reconcile(row.id);
+      const campaign=pendingCampaign(this.store,row.coin_id),leg=campaignLeg(this.store,row.id);
+      if(campaign&&(!leg||leg.campaign_id!==campaign.id))throw Error('Treasury campaign is pending');
+      if(leg&&Date.now()>JSON.parse(leg.campaign_record).deadline)throw Error('Campaign authority expired');
+      if(leg&&(!campaign||leg.coin_id!==row.coin_id||leg.kind!==row.kind||leg.amount_wei!==row.amount_wei||leg.expires_at!==row.expires_at||leg.campaign_status!=='running'))throw Error('Campaign leg authorization mismatch');
       if(hasPendingDomainBridge(this.store,row.coin_id)) throw Error('Domain funding is pending for this wallet');
       if(row.expires_at<=Date.now()) throw Error('Unsigned intent expired');
       const pending=this.store.pending(row.coin_id);
@@ -97,6 +123,7 @@ export class SigningEngine {
       if(nonce!==latest) throw Error('Untracked pending nonce; signing stopped');
       if(gasPrice>this.policy.maxGasPriceWei) throw Error('Gas price exceeds platform policy');
       const gas=estimated*120n/100n;if(gas>2000000n) throw Error('Gas estimate exceeds transaction policy');
+      if(row.kind==='reward'&&(!leg?.gas_limit_wei||gas*gasPrice>BigInt(leg.gas_limit_wei)))throw Error('Reward gas exceeds its reserved allowance');
       const cost=transaction.value+gas*gasPrice,available=balance<confirmed?balance:confirmed;
       if(available<cost+this.policy.gasReserveWei) throw Error('Insufficient confirmed funds after gas reserve');
       const expected={...transaction,nonce,gas,gasPrice};
@@ -116,7 +143,11 @@ export class SigningEngine {
       const canonical=await this.client.getBlock({blockNumber:receipt.blockNumber});
       if(canonical.hash!==receipt.blockHash) throw Error('Transaction receipt changed; reconciliation required');
       if(row.receipt_hash&&row.receipt_hash!==receipt.blockHash) throw Error('Confirmed transaction reorganized; reconciliation required');
-      if(head.number-receipt.blockNumber>=3n) this.store.finish(id,receipt);
+      if(head.number-receipt.blockNumber>=3n){
+        if(receipt.status==='success'&&row.kind==='buyback'&&netReceived(receipt.logs??[],this.store.wallet(row.coin_id).token_address,this.store.wallet(row.coin_id).address)<=0n)throw Error('Buy receipt has no verified tokens received');
+        if(receipt.status==='success'&&row.kind==='burn'&&netReceived(receipt.logs??[],this.store.wallet(row.coin_id).token_address,BURN_SINK)!==BigInt(row.amount_wei))throw Error('Burn-sink receipt does not prove the authorized amount');
+        this.store.finish(id,receipt);
+      }
       return summary(this.store.intent(id));
     }
     if(['confirmed','reverted'].includes(row.status)) throw Error('Confirmed transaction is missing; reconciliation required');

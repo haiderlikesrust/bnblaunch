@@ -12,3 +12,11 @@ test('spend validation uses exact integer units and separate token balances',()=
   assert.throws(()=>validatePlanFunds({...plan,transaction:{...plan.transaction,kind:'burn',amountWei:'21'}},10n,20n));
   assert.throws(()=>validatePlanFunds({...plan,transaction:{...plan.transaction,kind:'none',amountWei:'1'}},10n,20n));
 });
+test('reward and combined buy/burn plans are BNB budgets and cannot inject recipients',()=>{
+ for(const kind of ['rewards','buyback_burn']){
+  const p=agentPlan.parse({...plan,transaction:{kind,amountWei:'10',reason:'Use available funds transparently.'}});
+  assert.equal(validatePlanFunds(p,10n,0n).transaction.kind,kind);
+  assert.throws(()=>validatePlanFunds(p,9n,1000n));
+  assert.equal(agentPlan.safeParse({...p,transaction:{...p.transaction,recipient:'0x123'}}).success,false);
+ }
+});

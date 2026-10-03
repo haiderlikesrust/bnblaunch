@@ -25,7 +25,7 @@ No Cloudflare D1, Sites account, ChatGPT login, or separate API domain is requir
 | `SIGNER_WORKER_TOKEN` | Different random credential, at least 40 characters | worker, signer |
 | `WORKER_TOKEN` | Another random credential, at least 40 characters | web, worker |
 | `BNB_RPC_URL` | Reliable BNB mainnet HTTPS RPC with historical state support | web, signer |
-| `SIGNER_SETTLEMENT_ADDRESS` | Your platform's dedicated **public BNB billing address** | web, signer |
+| `SIGNER_SETTLEMENT_ADDRESS` | Reusable SolCard BNB Chain address `0x4ed72eb56621de657d62007bc7a798d314d9765b`; never an agent wallet | web, signer |
 
 Generate each secret separately with `openssl rand -hex 32`. Do not reuse a token for another role. No developer private key is needed: the signer generates a different wallet for each agent. The master key encrypts those wallets; it is not an agent's blockchain private key. Losing it makes the wallets inaccessible. Do not regenerate it during redeploys.
 
@@ -61,9 +61,9 @@ The template leaves visitor Q&A disabled until its separate allowance is configu
 
 ## Current operational boundary
 
-The worker implements confirmed treasury observation, central-compute collateral reservations, confirmed BNB service-payment reconciliation, metered model planning with an independent guard, generated community pages, custom-domain operations, autonomous chat closure, and durable operation queues. The signer implements fixed-recipient compute payments, supported Flap/Pancake V2 buybacks, own-token burn-sink transfers, and separately validated domain-funding operations. Burn-sink transfers are not represented as proof of a reduction in total supply.
+The worker implements confirmed treasury observation, central-compute collateral reservations, confirmed BNB service-payment reconciliation, metered model planning with an independent guard, generated community pages, custom-domain operations, autonomous chat closure, and durable operation queues. The signer implements fixed-recipient compute payments, supported Flap/Pancake V2 buybacks, own-token burn-sink transfers, deterministic holder-reward campaigns, receipt-bound buyback-and-burn campaigns, and separately validated domain-funding operations. Burn-sink transfers are not represented as proof of a reduction in total supply.
 
-**This is not a completed public mainnet rollout.** Live provider billing and funded transactions have not been exercised. X, image and domain automation require funded integration validation. Automated provider, bridge and hosting tests do not establish that a real purchase, payment, registration or TLS deployment succeeded. Holder distribution and Flap pre-migration chart indexing remain incomplete. Launch readiness refuses selected capabilities that the worker does not support; setting API keys cannot override that check. Unknown provider charges retain credit reservations and require reconciliation rather than being refunded as zero.
+**This is not a completed public mainnet rollout.** Live provider billing and funded transactions have not been exercised. X, image and domain automation require funded integration validation. Automated provider, bridge and hosting tests do not establish that a real purchase, payment, registration or TLS deployment succeeded. Holder distributions, combined buyback-and-burn campaigns and Flap pre-migration candle indexing are implemented and covered by automated tests; live funded verification is deliberately excluded from this change. Launch readiness refuses selected capabilities that the worker does not support; setting API keys cannot override that check. Unknown provider charges retain credit reservations and require reconciliation rather than being refunded as zero.
 
 ## X and image setup
 
@@ -73,7 +73,23 @@ After confirmed launch and funding, a guarded agent plan can enqueue text, an im
 
 The queue limits publishing to one job per hour and eight per rolling day per coin. It persists each write's state before calling a provider. A timed-out X post is checked against the expected author, content, time and attachment identity; missing evidence is held for review. Generation/upload timeouts and unknown billing also hold reservations. There is no automatic retry of an ambiguous paid write or public-post control for creators. Verify provider records before any manual reconciliation.
 
-OpenRouter's previous crypto API now returns 410. Its current credit purchase flow is through its web checkout. Receiving a coin's BNB payment in the platform wallet does **not** mean OpenRouter has been funded; the internal ledger only credits payments against verified existing provider collateral. TwitterAPI.io crypto top-up also requires its provider checkout unless a supported automated flow is added.
+OpenRouter's retired crypto endpoint is not used. The configured settlement recipient is the operator-confirmed reusable SolCard address on BNB Chain. The worker rounds small service prepayments up to the confirmed 0.01 BNB minimum and rejects any payment over 65.77 BNB; the signer enforces the same limits independently. This is a fixed native-BNB transfer with no arbitrary recipient or calldata. Insufficient treasury funds or provider collateral postpones the payment rather than splitting it into below-minimum deposits.
+
+Enable OpenRouter **auto top-up** with the saved SolCard, choose the credit threshold and purchase amount, and seed both the card and OpenRouter's initial credits. Saving a card alone does not activate auto top-up. Agent service prepayments replenish the card; OpenRouter handles its card charge separately. Set the auto-top-up threshold early enough for deposits and card charges to clear. If a charge is declined, OpenRouter disables auto top-up: fix the card funding/payment issue and re-enable it in OpenRouter.
+
+The service ledger is still backed by independently fetched OpenRouter credits; a BNB transfer proves neither a SolCard conversion nor a successful OpenRouter purchase. Pending compute payments are not resent while credit settlement waits. The 10% provider-collateral margin is a solvency buffer, not an assertion about actual SolCard conversion or OpenRouter checkout fees. Card fees, spreads and any unrelated use of this card remain platform operating costs; this integration has no API access to verify the card's USD balance or attribute its charges. Keep this card dedicated to shared service costs and maintain working capital. No SolCard login, card number or CVV goes in SHEN's environment.
+
+TwitterAPI.io crypto top-up still uses its provider checkout; no alternative model provider has been integrated.
+
+## Treasury campaigns and pre-migration charts
+
+The agent can propose `rewards` (total BNB budget including payout gas), `buyback` (buy and retain its own token), `buyback_burn` (BNB buy input followed by an own-token sink transfer), or `burn` (token base units). Public Q&A and creators cannot submit these operations. The planner uses income, market data and expenses without a daily spending cap. Buybacks use the existing platform enablement flag, 1% configured slippage by default, a separate 3% maximum quote price impact, and a gas reserve. There are no price targets or volume-manufacturing strategies.
+
+Rewards index Transfer logs from the verified launch through a frozen snapshot at least 12 blocks deep. The holder ledger must match total supply and eligible balances are checked independently at that block. Only externally owned accounts qualify; contracts (including pools), infrastructure, agent and burn addresses are excluded. Allocate pro rata after reserving worst-case gas; skip payouts no larger than twice their gas allowance and retain integer-rounding dust. Indexing is bounded to 50,000 nonzero balances. If RPC history or verification is unavailable, funds are not distributed. Each payout is an immutable, independently journaled transaction. Expired or reverted recipients are not paid through replacement intents; partial distributions are shown as partial.
+
+Combined buys burn only the net own-token transfers received in that buy's confirmed receipt. A successful EVM receipt alone is insufficient evidence of a burn. Restart and timeout recovery reuse signed bytes and do not repeat the purchase. Pending campaigns hold the wallet against other operations and custom-domain funding. Unknown chain results remain pending for reconciliation. The Revenue tab lists the authorized amount, confirmed payouts and buy/burn transaction links.
+
+The worker independently indexes confirmed Flap Portal events for launched SHEN coins and journals its block cursor and trade records. Historical state and log access are required on the BNB RPC. Before migration, five-minute OHLC candles use actual BNB-per-token execution ratios; they are not converted into fabricated historical USD prices. After migration, the existing exchange feed uses explicitly labeled USD candles. Canonical hash changes reset the curve history for reindexing. Missing intervals remain empty; delayed backfills and cached data are labeled.
 
 ## Persistence and recovery
 

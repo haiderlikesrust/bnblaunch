@@ -6,6 +6,7 @@ import { bsc, base } from 'viem/chains';
 import { getOrderId } from '@relay-protocol/settlement-sdk';
 import { DomainFunding } from './domain-funding.mjs';
 import { WalletStore, authenticate } from './store.mjs';
+import { Campaigns } from './campaigns.mjs';
 import { SigningEngine } from './engine.mjs';
 
 process.umask(0o077);
@@ -24,6 +25,7 @@ mkdirSync(dirname(storePath),{recursive:true,mode:0o700});
 const store=new WalletStore(storePath,required('SIGNER_MASTER_KEY'));
 const client=createPublicClient({chain:bsc,transport:http(rpc,{timeout:12000,retryCount:1})});
 const engine=new SigningEngine(store,client,{settlementAddress,slippageBps,gasReserveWei:positive('SIGNER_GAS_RESERVE_WEI'),maxGasPriceWei:positive('SIGNER_MAX_GAS_PRICE_WEI'),buybacksEnabled:env.SIGNER_BUYBACKS_ENABLED==='true'});
+const campaigns=new Campaigns(store,engine);
 const domainFundingEnabled=env.DOMAIN_AUTO_FUNDING_ENABLED==='true';
 if(domainFundingEnabled&&(!env.BASE_RPC_URL||new URL(env.BASE_RPC_URL).protocol!=='https:'||!env.PORKBUN_API_KEY||!env.PORKBUN_SECRET_KEY))throw Error('Domain funding requires HTTPS Base RPC and Porkbun credentials');
 const baseClient=createPublicClient({chain:base,transport:http(env.BASE_RPC_URL??'https://mainnet.base.org',{timeout:12000,retryCount:1})});
@@ -46,6 +48,11 @@ const server=createServer(async(req,res)=>{
       await engine.chainReady();
       return send(res,200,{chainId:56,signingReady:true,domainFundingEnabled,workerAuthorized:worker,custody:'dedicated-agent-wallets',requiresDeveloperApproval:false,settlementAddress,gasReserveWei:engine.policy.gasReserveWei.toString(),buybacksEnabled:engine.policy.buybacksEnabled});
     }
+    if(path==='/v1/campaigns'&&worker&&req.method==='POST')return send(res,200,{campaign:campaigns.start(await body(req))});
+    const campaignRecord=path.match(/^\/v1\/campaigns\/([0-9a-f-]{36})\/record$/i);
+    if(campaignRecord&&req.method==='GET')return send(res,200,{checkedAt:Date.now(),campaign:campaigns.status(campaignRecord[1])});
+    const campaignTick=path.match(/^\/v1\/campaigns\/([0-9a-f-]{36})\/tick$/i);
+    if(campaignTick&&worker&&req.method==='POST'){exact(await body(req),[]);return send(res,200,{campaign:await campaigns.tick(campaignTick[1])});}
     if(path==='/v1/domain-funding'&&worker&&req.method==='POST')return send(res,200,{job:domainFunding.start(await body(req))});
     const fundingRecord=path.match(/^\/v1\/domain-funding\/([0-9a-f-]{36})\/record$/i);
     if(fundingRecord&&req.method==='GET')return send(res,200,{job:domainFunding.status(fundingRecord[1])});

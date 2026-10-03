@@ -1,0 +1,1 @@
+ALTER TABLE `agent_operations` ADD `details` text;

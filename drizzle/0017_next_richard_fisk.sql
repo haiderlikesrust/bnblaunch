@@ -1,0 +1,1 @@
+ALTER TABLE `curve_cursors` ADD `indexed_at` integer DEFAULT 0 NOT NULL;

@@ -81,7 +81,7 @@ export class WalletStore {
   intent(id) { return this.db.prepare('SELECT * FROM intents WHERE id=?').get(id); }
   expireUnsigned(id) { this.db.prepare("UPDATE intents SET status='expired' WHERE id=? AND status='created' AND expires_at<=?").run(id,Date.now()); }
   createIntent({ id, coinId, kind, amountWei, expiresAt }) {
-    if (!UUID.test(id) || !UUID.test(coinId) || !['compute', 'buyback', 'burn'].includes(kind) || !/^\d{1,78}$/.test(amountWei) || BigInt(amountWei) <= 0n) throw Error('Invalid intent');
+    if (!UUID.test(id) || !UUID.test(coinId) || !['compute', 'buyback', 'burn', 'reward'].includes(kind) || !/^\d{1,78}$/.test(amountWei) || BigInt(amountWei) <= 0n) throw Error('Invalid intent');
     const request = JSON.stringify({ coinId, kind, amountWei });
     const prior = this.intent(id);
     if (prior) { if (prior.request !== request) throw Error('Intent is immutable'); return prior; }

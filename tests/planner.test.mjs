@@ -53,6 +53,17 @@ test('a rejected update or ambiguous provider failure preserves the last committ
 test('a funded first plan can defer publishing its website',async()=>{
  const f=fixture();try{f.output({...plan,website:null});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(await publishedWebsite('coin'),null);const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.canPublishWebsite,true);assert.equal(snapshot.hasPublishedWebsite,false);assert.equal(snapshot.websiteTiming.priority,'growing');}finally{f.close()}
 });
+test('autonomous service prepayment honors the SolCard minimum without calling a paid model',async()=>{
+ const f=fixture();env.SIGNER_SETTLEMENT_ADDRESS='0x4ed72eb56621de657d62007bc7a798d314d9765b';try{
+  f.sql.prepare('UPDATE coins SET ai_credit_microusd=0').run();
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'service_payment_queued');
+  const payment=f.sql.prepare('SELECT kind,amount_wei,reserved_microusd FROM agent_operations').get();
+  assert.equal(payment.kind,'compute');assert.equal(payment.amount_wei,'10000000000000000');assert.equal(payment.reserved_microusd,7200000);assert.equal(f.calls.length,0);
+ }finally{delete env.SIGNER_SETTLEMENT_ADDRESS;f.close();}
+});
+test('guarded agent reward proposal enters the durable queue without public recipient controls',async()=>{
+ const f=fixture();try{f.output({...plan,website:null,transaction:{kind:'rewards',amountWei:'10000000000000000',reason:'Distribute an affordable share of fee income.'}});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');const operation=f.sql.prepare('SELECT kind,amount_wei,status FROM agent_operations').get();assert.equal(operation.kind,'rewards');assert.equal(operation.status,'queued');assert.equal(operation.amount_wei,'10000000000000000');assert.ok(Array.isArray(JSON.parse(f.calls[0].messages[1].content).recentTreasuryActions));}finally{f.close();}
+});
 for(const rejectGuard of [false,true])test(`a truncated ${rejectGuard?'guard':'planner'} response settles its verified cost and allows the next plan`,async()=>{
  const f=fixture();try{
   f.modifyReply((reply,guard)=>{if(guard===rejectGuard)reply.choices[0].finish_reason='length';return reply});

@@ -1,3 +1,4 @@
+import { serviceFundingAmount } from '../shared/service-funding.mjs';
 import { env } from "cloudflare:workers";
 import { z } from "zod";
 import { formatEther, parseEther, parseAbi, type Address } from "viem";
@@ -103,18 +104,18 @@ export async function runAgentTick(capabilities?:string[]){
       const affordable=Number((available>minimumGas?available-minimumGas:0n)*price.answer/100000000000000000000n);
       const target=Math.floor(Math.min(Math.max(5000000,(ceiling+contentAllowance)*8),affordable,(capacity.available-capacity.liability)/1.2));
       if(target+row.ai_credit_microusd<ceiling+contentAllowance||target<=0)return {processed:true,reason:"awaiting_service_funding"};
-      const fundingReserve=Math.ceil(target*1.2);
-      if(capacity.available-capacity.liability<fundingReserve)return {processed:true,reason:"central_compute_funding_required"};
-      const amount=(BigInt(target)*100000000000000000000n+price.answer-1n)/price.answer;
+      const payment=serviceFundingAmount({targetMicrousd:target,price:price.answer,availableWei:available>minimumGas?available-minimumGas:0n,capacityMicrousd:capacity.available-capacity.liability,address:env.SIGNER_SETTLEMENT_ADDRESS});
+      if(!payment)return {processed:true,reason:'service_deposit_minimum_or_collateral_required'};
+      const {amountWei:amount,reserveMicrousd:fundingReserve}=payment;
       await queue(lease,"compute",amount.toString(),"Prepay metered agent services from treasury.",{reserve:fundingReserve,capacity:capacity.available});return {processed:true,reason:"service_payment_queued"};
     }
     const tokenBalance=await chainClient().readContract({address:coin.tokenAddress as Address,abi:parseAbi(["function balanceOf(address) view returns(uint256)"]),functionName:"balanceOf",args:[wallet.address as Address]});
-    const [community,market,hosted,costs,domains]=await Promise.all([contentSnapshot(coin),marketContext(row.token_address!),publishedWebsite(coin.id),db().prepare(`SELECT
+    const [community,market,hosted,costs,domains,operations]=await Promise.all([contentSnapshot(coin),marketContext(row.token_address!),publishedWebsite(coin.id),db().prepare(`SELECT
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
       (SELECT COALESCE(SUM(cost_microusd),0) FROM chat_runs WHERE coin_id=? AND status='settled' AND created_at>?) AS hour,
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
       (SELECT COALESCE(SUM(cost_microusd),0) FROM chat_runs WHERE coin_id=? AND status='settled' AND created_at>?) AS day`)
-      .bind(coin.id,new Date(Date.now()-3600000).toISOString(),coin.id,Date.now()-3600000,coin.id,new Date(Date.now()-86400000).toISOString(),coin.id,Date.now()-86400000).first<{hour:number;day:number}>(),domainSnapshot(coin.id,coin.website&&capabilities.includes("custom-domains"))]);
+      .bind(coin.id,new Date(Date.now()-3600000).toISOString(),coin.id,Date.now()-3600000,coin.id,new Date(Date.now()-86400000).toISOString(),coin.id,Date.now()-86400000).first<{hour:number;day:number}>(),domainSnapshot(coin.id,coin.website&&capabilities.includes("custom-domains")),db().prepare("SELECT kind,amount_wei AS amountWei,status,reason,created_at AS createdAt,tx_hash AS hash FROM agent_operations WHERE coin_id=? ORDER BY created_at DESC LIMIT 8").bind(coin.id).all()]);
     const websiteQuote=coin.website&&!hosted?await bnbPrice().catch(()=>null):null;
     const siteTiming=websiteTiming(feeFlow.lifetimeDistributedWei,websiteQuote?.answer);
     const run=await reserve(lease,ceiling);
@@ -124,7 +125,7 @@ export async function runAgentTick(capabilities?:string[]){
     // Project bounded facts, not full old image prompts or entire site copies.
     const communityContext={...community,recent:community.recent.map(j=>({status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
     const previousSite=hosted?{title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
-    const snapshot={domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
+    const snapshot={recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
     const system=PLANNER_RULES+" Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
     let bounded;
     try{bounded=boundedPlanningContext(system,snapshot)}catch(error){await settle(coin.id,run,researchCost,'Essential planning context exceeded the local input bound.');throw error;}
@@ -134,7 +135,7 @@ export async function runAgentTick(capabilities?:string[]){
       if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,researchCost,'Planner request rejected before dispatch.');throw error;
     }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(plan.transaction.kind==="buyback"&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return {processed:true,reason:"plan_rejected"};}
+    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return {processed:true,reason:"plan_rejected"};}
     let guard;
     try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},800,64000);}catch(error){
       if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return {processed:true,reason:'plan_rejected'};}

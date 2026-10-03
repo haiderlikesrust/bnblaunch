@@ -14,6 +14,7 @@ async function request(base,path,token,data,site=false){
 }
 const site=(data)=>request(app,'/api/internal/worker',env.WORKER_TOKEN,data,true);
 async function cycle(){
+  try{await site({action:'index'});}catch{console.warn('Curve indexing awaits an available canonical RPC range.');}
   const authority=await request(signer,'/v1/status',env.SIGNER_WORKER_TOKEN);
   if(!authority.signingReady||!authority.workerAuthorized||authority.chainId!==56)throw Error('Worker signing authority unavailable');
   const {operations,domainFunding=[]}=await site();
@@ -26,9 +27,16 @@ async function cycle(){
     try{
       // The immutable operation ID is reused after every timeout or restart.
       // Signer persistence determines whether to sign, replay or reconcile.
+      if(['rewards','buyback_burn'].includes(op.kind)){
+        const {campaign}=await request(signer,`/v1/campaigns/${op.id}/record`,env.SIGNER_WORKER_TOKEN);
+        if(campaign||op.expiresAt>Date.now()){
+          if(!campaign)await request(signer,'/v1/campaigns',env.SIGNER_WORKER_TOKEN,{id:op.id,coinId:op.coinId,kind:op.kind,amountWei:op.amountWei,expiresAt:op.expiresAt});
+          await request(signer,`/v1/campaigns/${op.id}/tick`,env.SIGNER_WORKER_TOKEN,{});
+        }
+      }else{
       const {intent}=await request(signer,`/v1/intents/${op.id}/record`,env.SIGNER_WORKER_TOKEN);
       if(intent?.hash)await request(signer,`/v1/intents/${op.id}`,env.SIGNER_WORKER_TOKEN);
-      else if(op.expiresAt>Date.now())await request(signer,`/v1/wallets/${op.coinId}/intent`,env.SIGNER_WORKER_TOKEN,{id:op.id,kind:op.kind,amountWei:op.amountWei,expiresAt:op.expiresAt});
+      else if(op.expiresAt>Date.now())await request(signer,`/v1/wallets/${op.coinId}/intent`,env.SIGNER_WORKER_TOKEN,{id:op.id,kind:op.kind,amountWei:op.amountWei,expiresAt:op.expiresAt});}
     }catch{console.warn('An agent operation awaits reconciliation. Its existing ID is retained.');}
     try{await site({action:'reconcile',id:op.id});}catch{console.warn('Operation settlement is pending.');}
   }

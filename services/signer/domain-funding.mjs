@@ -1,3 +1,4 @@
+import { pendingCampaign } from './campaigns.mjs';
 import { randomBytes } from 'node:crypto';
 import { decodeEventLog, decodeFunctionData, encodeFunctionData, isAddress, keccak256, parseAbi, parseTransaction, recoverTransactionAddress, recoverTypedDataAddress, zeroAddress } from 'viem';
 
@@ -93,7 +94,7 @@ export class DomainFunding {
   requireThat(UUID.test(input.id??'')&&UUID.test(input.coinId??'')&&Number.isSafeInteger(input.amountCents)&&input.amountCents>=100&&input.amountCents<=50000&&uint(input.maxBnbWei)>0n,'Invalid domain funding request');
   requireThat(Number.isSafeInteger(input.minimumCreditCents)&&input.minimumCreditCents>0&&input.minimumCreditCents<=input.amountCents,'Invalid minimum registrar credit');
   const request=JSON.stringify({coinId:input.coinId,amountCents:input.amountCents,minimumCreditCents:input.minimumCreditCents,maxBnbWei:input.maxBnbWei,expiresAt:input.expiresAt});
-  const prior=this.row(input.id);if(prior){requireThat(prior.request===request,'Domain funding request is immutable');return this.status(input.id);}
+  const prior=this.row(input.id);if(!prior&&pendingCampaign(this.store,input.coinId))throw Error('Treasury campaign is pending');if(prior){requireThat(prior.request===request,'Domain funding request is immutable');return this.status(input.id);}
   requireThat(this.policy.enabled===true&&this.policy.porkbunApiKey&&this.policy.porkbunSecretKey,'Automatic domain funding is not configured');
   requireThat(!/^(pk1|sk1)_sb_/.test(this.policy.porkbunApiKey)&&!/^(pk1|sk1)_sb_/.test(this.policy.porkbunSecretKey),'Sandbox registrar credentials are not allowed');
   requireThat(Number.isSafeInteger(input.expiresAt)&&input.expiresAt>Date.now()+60000&&input.expiresAt<=Date.now()+86400000,'Invalid funding expiry');
