@@ -5,11 +5,12 @@ import { chainClient } from "@/lib/providers";
 import { agentWallet, launchReadiness, requireLaunchReady, signerRequest } from "@/lib/signer";
 import { AppError, body, db, failure, identity, ownedCoin, response } from "@/lib/server";
 import { requestOrigin } from "@/lib/auth";
+import { metadataCid } from "@/lib/metadata-cid";
 
 const address=z.string().refine(v=>isAddress(v)&&v.toLowerCase()!==zeroAddress,"Invalid address");
 const input=z.discriminatedUnion("action",[
   z.object({action:z.literal("authorize"),creator:address}).strict(),
-  z.object({action:z.literal("prepare"),authorizationId:z.string().uuid(),signature:z.string().regex(/^0x[a-fA-F0-9]{130}$/),cid:z.string().regex(/^(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[a-z2-7]{20,100})$/),salt:z.string().regex(/^0x[a-fA-F0-9]{64}$/)}).strict(),
+  z.object({action:z.literal("prepare"),authorizationId:z.string().uuid(),signature:z.string().regex(/^0x[a-fA-F0-9]{130}$/),cid:metadataCid,salt:z.string().regex(/^0x[a-fA-F0-9]{64}$/)}).strict(),
   z.object({action:z.literal("confirm"),planId:z.string().uuid(),hash:z.string().regex(/^0x[a-fA-F0-9]{64}$/)}).strict(),
 ]);
 export async function GET(_request:Request,{params}:{params:Promise<{id:string}>}){

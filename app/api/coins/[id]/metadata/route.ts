@@ -3,6 +3,7 @@ import { coinUrl } from "@/lib/coin-links";
 import { z } from "zod";
 import { AppError, body, db, failure, identity, ownedCoin, readBody, remoteJson, response } from "@/lib/server";
 import { validateImage } from "@/lib/token-image";
+import { metadataCid } from "@/lib/metadata-cid";
 
 export async function POST(request:Request,{params}:{params:Promise<{id:string}>}){try{
  const owner=await identity(request),{coin}=await ownedCoin((await params).id,owner);
@@ -32,5 +33,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
  data.append("map",JSON.stringify({"0":["variables.file"]}));data.append("0",file);
  const result=await remoteJson<{data?:{create:string};errors?:unknown[]}>("https://funcs.flap.sh/api/upload",{method:"POST",body:data});
  if(result.errors||!result.data?.create)throw new AppError(502,"Flap metadata upload failed");
- return response({cid:result.data.create})
+ const cid=metadataCid.safeParse(result.data.create);
+ if(!cid.success)throw new AppError(502,"Flap returned an invalid metadata identifier. Please retry the upload.");
+ return response({cid:cid.data})
 }catch(e){return failure(e)}}
