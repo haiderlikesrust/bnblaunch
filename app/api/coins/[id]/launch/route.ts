@@ -1,14 +1,15 @@
 import { z } from "zod";
-import { isAddress, parseEther, formatEther, zeroAddress, keccak256, toHex, verifyMessage, type Address, type Hex } from "viem";
+import { isAddress, parseEther, formatEther, formatUnits, encodeFunctionData, zeroAddress, keccak256, toHex, verifyMessage, type Address, type Hex } from "viem";
 import { PORTAL, launchCalldata, launchParams, predictedAddress, portalAbi } from "@/lib/flap";
 import { chainClient } from "@/lib/providers";
 import { agentWallet, launchReadiness, requireLaunchReady, signerRequest } from "@/lib/signer";
 import { AppError, body, db, failure, identity, ownedCoin, response } from "@/lib/server";
 import { requestOrigin } from "@/lib/auth";
-import { initialBuyBnb, launchError, LaunchPendingError, launchTransactionState } from "@/lib/launch-validation";
+import { initialBuyBnb, parseQuoteBuy, launchError, LaunchPendingError, launchTransactionState } from "@/lib/launch-validation";
 import { coinTweetUrl } from "@/lib/coin-tweet";
 import { metadataCid } from "@/lib/metadata-cid";
 
+import {quoteTokenInfo,findConversionRoute,erc20QuoteAbi,sameAddress} from '@/shared/quote-pairs.mjs';
 const address=z.string().refine(v=>isAddress(v)&&v.toLowerCase()!==zeroAddress,"Invalid address");
 const hash=z.string().regex(/^0x[a-fA-F0-9]{64}$/);
 const input=z.discriminatedUnion("action",[
@@ -45,7 +46,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
     if(v.action==="confirm"){
       stage="confirmation";
       const hash=v.hash.toLowerCase() as Hex;
-      const plan=await db().prepare("SELECT * FROM prepared_launches WHERE coin_id=? AND id=?").bind(coin.id,v.planId).first<{creator:string;treasury:string;calldata:string;predicted_address:string;tx_hash:string|null;initial_buy_wei:string;tweet_url:string}>();
+      const plan=await db().prepare("SELECT * FROM prepared_launches WHERE coin_id=? AND id=?").bind(coin.id,v.planId).first<{creator:string;treasury:string;calldata:string;predicted_address:string;tx_hash:string|null;initial_buy_wei:string;tweet_url:string;quote_token:string}>();
       if(!plan)throw new AppError(409,"Prepare the launch before confirmation.");
       if(coin.tokenAddress){if(coin.tokenAddress.toLowerCase()===plan.predicted_address.toLowerCase()&&plan.tx_hash===hash)return response({coin,hash});throw new AppError(409,"This coin has a different confirmed launch.");}
       const wallet=await db().prepare("SELECT address FROM agent_wallets WHERE coin_id=?").bind(coin.id).first<{address:string}>();
@@ -57,12 +58,13 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
       const [tx,receipt,block]=await Promise.all([client.getTransaction({hash}),client.getTransactionReceipt({hash}),client.getBlockNumber()]);
       if(receipt.status!=="success")throw new AppError(409,"Transaction reverted; no launch recorded.");
       if(block-receipt.blockNumber<3n)throw new LaunchPendingError(202,"Confirming launch on BNB Chain… Waiting for 3 confirmations.");
-      if(tx.to?.toLowerCase()!==PORTAL.toLowerCase()||tx.from.toLowerCase()!==plan.creator.toLowerCase()||tx.input.toLowerCase()!==plan.calldata.toLowerCase()||tx.value!==BigInt(plan.initial_buy_wei))throw new AppError(400,"Transaction does not match the saved launch plan.");
+      if(tx.to?.toLowerCase()!==PORTAL.toLowerCase()||tx.from.toLowerCase()!==plan.creator.toLowerCase()||tx.input.toLowerCase()!==plan.calldata.toLowerCase()||tx.value!==(sameAddress(plan.quote_token,zeroAddress)?BigInt(plan.initial_buy_wei):0n))throw new AppError(400,"Transaction does not match the saved launch plan.");
       // The signer independently checks canonical receipt, token implementation,
       // beneficiary and tax routing before binding this wallet permanently.
       const binding=await signerRequest<{address:string;tokenAddress:string;hash:string}>(`/v1/wallets/${coin.id}/launch`,{hash});
       if(binding.address.toLowerCase()!==wallet.address||binding.tokenAddress.toLowerCase()!==plan.predicted_address.toLowerCase()||binding.hash!==hash)throw new AppError(503,"Agent wallet launch verification failed.");
-      const next={...coin,tweetUrl:plan.tweet_url,tokenAddress:plan.predicted_address,treasuryAddress:plan.treasury,state:"dormant"};
+      const quote=await quoteTokenInfo(client,plan.quote_token,false);
+      const next={...coin,quoteToken:quote.address,quoteSymbol:quote.symbol,quoteDecimals:quote.decimals,tweetUrl:plan.tweet_url,tokenAddress:plan.predicted_address,treasuryAddress:plan.treasury,state:"dormant"};
       const nextJson=JSON.stringify(next),now=new Date().toISOString();
       const batch=await db().batch([
         db().prepare("UPDATE coins SET config=?,token_address=?,treasury_address=?,updated_at=? WHERE id=? AND owner=? AND config=? AND token_address IS NULL").bind(nextJson,plan.predicted_address.toLowerCase(),plan.treasury.toLowerCase(),now,coin.id,owner,row.config),
@@ -88,12 +90,19 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
       const code=await client.getCode({address:v.creator as Address});
       if(code&&code!=="0x")throw new AppError(400,"Use a standard externally owned wallet for this launch.");
       const treasury=await agentWallet(coin.id),id=crypto.randomUUID(),expiresAt=Date.now()+600000;
-      const configHash=keccak256(toHex(row.config)),buyWei=parseEther(v.initialBuyBnb);
-      const message=["SHEN launch authorization",`Origin: ${requestOrigin(request)}`,"Chain ID: 56",`Coin: ${coin.id}`,`Creator: ${v.creator.toLowerCase()}`,`Agent wallet: ${treasury.toLowerCase()}`,`Configuration: ${configHash}`,`Developer buy: ${formatEther(buyWei)} BNB`,`Coin tweet: ${v.tweetUrl||"None"}`,`Nonce: ${id}`,`Expires: ${new Date(expiresAt).toISOString()}`,"The agent signs its own permitted transactions. After launch, the developer cannot pause or resume it. This message authorizes launch preparation only."].join("\n");
-      await db().prepare("INSERT INTO launch_authorizations(id,coin_id,creator,treasury,message,config_hash,expires_at,initial_buy_wei,tweet_url) VALUES(?,?,?,?,?,?,?,?,?)").bind(id,coin.id,v.creator.toLowerCase(),treasury.toLowerCase(),message,configHash,expiresAt,buyWei.toString(),v.tweetUrl).run();
-      return response({authorizationId:id,message,treasury,expiresAt});
+      const quote=await quoteTokenInfo(client,coin.quoteToken??zeroAddress);
+      if(!sameAddress(quote.address,zeroAddress))await findConversionRoute(client,quote.address,10n**BigInt(quote.decimals));
+      const configHash=keccak256(toHex(row.config)),buyWei=parseQuoteBuy(v.initialBuyBnb,quote.decimals);
+      const message=["SHEN launch authorization",`Origin: ${requestOrigin(request)}`,"Chain ID: 56",`Coin: ${coin.id}`,`Creator: ${v.creator.toLowerCase()}`,`Agent wallet: ${treasury.toLowerCase()}`,`Configuration: ${configHash}`,`Pair token: ${quote.symbol} (${quote.address})`,`Developer buy: ${formatUnits(buyWei,quote.decimals)} ${quote.symbol}`,`Coin tweet: ${v.tweetUrl||"None"}`,`Nonce: ${id}`,`Expires: ${new Date(expiresAt).toISOString()}`,"The agent signs its own permitted transactions. After launch, the developer cannot pause or resume it. This message authorizes launch preparation only."].join("\n");
+      await db().prepare("INSERT INTO launch_authorizations(id,coin_id,creator,treasury,message,config_hash,expires_at,initial_buy_wei,tweet_url,quote_token,quote_decimals) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(id,coin.id,v.creator.toLowerCase(),treasury.toLowerCase(),message,configHash,expiresAt,buyWei.toString(),v.tweetUrl,quote.address,quote.decimals).run();
+      const approvals:Record<string,string>[]=[];
+      if(!sameAddress(quote.address,zeroAddress)&&buyWei>0n){
+       const allowance=await client.readContract({address:quote.address as Address,abi:erc20QuoteAbi,functionName:'allowance',args:[v.creator as Address,PORTAL]});
+       if(allowance<buyWei){if(allowance>0n)approvals.push({from:v.creator,to:quote.address,value:'0x0',chainId:'0x38',data:encodeFunctionData({abi:erc20QuoteAbi,functionName:'approve',args:[PORTAL,0n]})});approvals.push({from:v.creator,to:quote.address,value:'0x0',chainId:'0x38',data:encodeFunctionData({abi:erc20QuoteAbi,functionName:'approve',args:[PORTAL,buyWei]})});}
+      }
+      return response({authorizationId:id,message,treasury,expiresAt,quote,approvals});
     }
-    const auth=await db().prepare("SELECT * FROM launch_authorizations WHERE id=? AND coin_id=?").bind(v.authorizationId,coin.id).first<{creator:string;treasury:string;message:string;config_hash:string;expires_at:number;used_at:number|null;initial_buy_wei:string;tweet_url:string;metadata_cid:string|null}>();
+    const auth=await db().prepare("SELECT * FROM launch_authorizations WHERE id=? AND coin_id=?").bind(v.authorizationId,coin.id).first<{creator:string;treasury:string;message:string;config_hash:string;expires_at:number;used_at:number|null;initial_buy_wei:string;tweet_url:string;quote_token:string;quote_decimals:number;metadata_cid:string|null}>();
     if(!auth||auth.expires_at<Date.now()||auth.config_hash!==keccak256(toHex(row.config)))throw new AppError(409,"Launch authorization expired or the plan changed. Prepare again.");
     // Only metadata SHEN pinned for this authorization may be launched.
     if(!auth.metadata_cid||auth.metadata_cid!==v.cid)throw new AppError(409,"Launch metadata does not match this authorization. Validate the launch again.");
@@ -106,20 +115,23 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
     const existingCode=await client.getCode({address:predicted});
     if(existingCode&&existingCode!=="0x")throw new AppError(409,"Predicted token address already exists.");
     stage="contract validation";
-    const buyWei=BigInt(auth.initial_buy_wei);
+    const quote=await quoteTokenInfo(client,auth.quote_token);
+    if(quote.decimals!==auth.quote_decimals||!sameAddress(auth.quote_token,coin.quoteToken??zeroAddress))throw new AppError(409,'Pair configuration changed. Prepare again.');
+    if(!sameAddress(quote.address,zeroAddress))await findConversionRoute(client,quote.address,10n**BigInt(quote.decimals));
+    const buyWei=BigInt(auth.initial_buy_wei),nativeValue=sameAddress(quote.address,zeroAddress)?buyWei:0n;
     const calldata=launchCalldata(coin,v.cid,treasury,salt,buyWei);
-    await client.simulateContract({account:auth.creator as Address,address:PORTAL,abi:portalAbi,functionName:"newTokenV6",args:[launchParams(coin,v.cid,treasury,salt,buyWei)],value:buyWei});
-    const gas=await client.estimateGas({account:auth.creator as Address,to:PORTAL,data:calldata,value:buyWei});
+    await client.simulateContract({account:auth.creator as Address,address:PORTAL,abi:portalAbi,functionName:"newTokenV6",args:[launchParams(coin,v.cid,treasury,salt,buyWei)],value:nativeValue});
+    const gas=await client.estimateGas({account:auth.creator as Address,to:PORTAL,data:calldata,value:nativeValue});
     const gasLimit=gas*120n/100n;
     const [balance,gasPrice]=await Promise.all([client.getBalance({address:auth.creator as Address,blockTag:"pending"}),client.getGasPrice()]);
-    if(balance<buyWei+gasLimit*gasPrice)throw new AppError(422,"Your launch wallet needs enough BNB for the developer buy and network gas. Estimated total: "+formatEther(buyWei+gasLimit*gasPrice)+" BNB.");
+    if(balance<nativeValue+gasLimit*gasPrice)throw new AppError(422,"Your launch wallet needs enough BNB for the developer buy and network gas. Estimated total: "+formatEther(nativeValue+gasLimit*gasPrice)+" BNB.");
     stage="plan storage";
     await db().batch([
-      db().prepare("INSERT INTO prepared_launches(id,coin_id,creator,treasury,calldata,predicted_address,cid,created_at,initial_buy_wei,tweet_url) SELECT ?,?,?,?,?,?,?,?,?,? FROM launch_authorizations WHERE id=? AND used_at IS NULL ON CONFLICT(id) DO NOTHING").bind(v.authorizationId,coin.id,auth.creator,auth.treasury,calldata,predicted,v.cid,new Date().toISOString(),buyWei.toString(),auth.tweet_url,v.authorizationId),
+      db().prepare("INSERT INTO prepared_launches(id,coin_id,creator,treasury,calldata,predicted_address,cid,created_at,initial_buy_wei,tweet_url,quote_token) SELECT ?,?,?,?,?,?,?,?,?,?,? FROM launch_authorizations WHERE id=? AND used_at IS NULL ON CONFLICT(id) DO NOTHING").bind(v.authorizationId,coin.id,auth.creator,auth.treasury,calldata,predicted,v.cid,new Date().toISOString(),buyWei.toString(),auth.tweet_url,quote.address,v.authorizationId),
       db().prepare("UPDATE launch_authorizations SET used_at=? WHERE id=? AND used_at IS NULL AND EXISTS(SELECT 1 FROM prepared_launches WHERE id=?)").bind(Date.now(),v.authorizationId,v.authorizationId),
     ]);
     const saved=await db().prepare("SELECT calldata FROM prepared_launches WHERE id=?").bind(v.authorizationId).first<{calldata:string}>();
     if(saved?.calldata!==calldata)throw new AppError(409,"This authorization was already used for a different plan.");
-    return response({planId:v.authorizationId,transaction:{from:auth.creator,to:PORTAL,data:calldata,value:toHex(buyWei),chainId:"0x38",gas:toHex(gasLimit)},initialBuyBnb:formatEther(buyWei),estimatedGasBnb:formatEther(gasLimit*gasPrice),predictedAddress:predicted,treasury,preflight:"passed",agentWalletReady:true});
+    return response({planId:v.authorizationId,transaction:{from:auth.creator,to:PORTAL,data:calldata,value:toHex(nativeValue),chainId:"0x38",gas:toHex(gasLimit)},initialBuyBnb:formatUnits(buyWei,quote.decimals),quoteSymbol:quote.symbol,quoteToken:quote.address,estimatedGasBnb:formatEther(gasLimit*gasPrice),predictedAddress:predicted,treasury,preflight:"passed",agentWalletReady:true});
   }catch(e){const error=launchError(e,stage);if(stage==="confirmation"&&error instanceof LaunchPendingError)return response({status:"pending",message:error.message},202);return failure(error)}
 }

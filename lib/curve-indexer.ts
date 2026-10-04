@@ -56,7 +56,9 @@ export async function curveMarket(token:string):Promise<(MarketData&{migrated:bo
  const times=await db().prepare('SELECT MAX(time) AS latest FROM curve_trades WHERE coin_id=?').bind(c.coin_id).first<{latest:number|null}>();
  const lower=times?.latest?Math.floor(times.latest/300)*300-99*300:0;
  const rows=await db().prepare('SELECT id,block_number AS block,block_hash AS blockHash,time,log_index AS logIndex,token_wei AS tokenWei,quote_wei AS quoteWei,side,tx_hash AS hash FROM curve_trades WHERE coin_id=? AND time>=? ORDER BY block_number,log_index').bind(c.coin_id,lower).all<CurveTrade>();
- const candles=curveCandles(rows.results),price=await bnbPrice().catch(()=>null),native=candles.at(-1)?.close;
- return {candles,source:'Flap',currency:'BNB',migrated:!!c.migrated,updatedAt:c.indexed_at,stale:!c.caught_up||Date.now()-c.indexed_at>300000,indexing:!c.caught_up,indexedThrough:c.next_block?c.next_block-1:null,lastTradeAt:times?.latest?times.latest*1000:null,
+ const meta=await db().prepare('SELECT config FROM coins WHERE id=?').bind(c.coin_id).first<{config:string}>(),coin=meta?JSON.parse(meta.config):{};
+ const isNative=!coin.quoteToken||coin.quoteToken==='0x0000000000000000000000000000000000000000';
+ const candles=curveCandles(rows.results,isNative?18:coin.quoteDecimals),price=isNative?await bnbPrice().catch(()=>null):null,native=candles.at(-1)?.close;
+ return {candles,source:'Flap',currency:isNative?'BNB':coin.quoteSymbol??'QUOTE',migrated:!!c.migrated,updatedAt:c.indexed_at,stale:!c.caught_up||Date.now()-c.indexed_at>300000,indexing:!c.caught_up,indexedThrough:c.next_block?c.next_block-1:null,lastTradeAt:times?.latest?times.latest*1000:null,
   valuation:{priceUsd:native!==undefined&&price?native*Number(price.answer)/1e8:null,marketCapUsd:null,fullyDilutedValuationUsd:null,tokenLiquidityUsd:null,volume24hUsd:null}};
 }

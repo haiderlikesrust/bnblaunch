@@ -166,3 +166,13 @@ Follow-up validation: 340 automated tests, TypeScript, and the Dokploy productio
 
 ### Higgsfield single-key authentication
 The current official quick start accepts the complete API key as copied. Added `HIGGSFIELD_API_KEY` to the server, Compose and env templates; it takes precedence over legacy ID/secret settings and is sent unchanged after the Key authorization scheme. Existing split credentials remain compatible. Tests cover single-key headers, precedence, malformed-key rejection and legacy behavior.
+
+## Follow-up: agent evolution, coding and quote pairs
+
+Approved plans can maintain a consistent persona and revise sourced website pages, FAQs and search tools using aggregated visitor feedback. Chat, community posts and influencer generation share that persona. The public Code editor shows saved JavaScript/Python workspaces, tests and execution results. Execution requires a separately deployed gVisor runner; generated jobs receive no network, host mounts, wallet keys or provider credentials. Unknown coding charges remain isolated and retries reuse the same job ID. See [agent evolution](docs/AGENT-EVOLUTION.md) and [coding deployment](docs/CODING-SANDBOX.md).
+
+Kling remains the default influencer video model using the coin/character image. Optional motion-transfer configuration requires a source video. Provider/model tariffs are captured at reservation, and confirmed rejected video generation can fall back to a finished still without retaining the unused video allowance.
+
+New coins use 2% buy and sell tax; existing 3% launches remain valid. The launch flow supports eligible Flap crypto, stock-token, pre-IPO and custom-address quote pairs. Non-BNB launches request a separate creator BNB gas deposit after launch confirmation, with durable nonce/receipt recovery. A separate signer pass converts audited earned quote fees through fixed PancakeSwap V2/V3 routes to WBNB and unwraps to BNB. Only confirmed native proceeds enter the protocol split; missing liquidity or gas does not stall unrelated planning. See [quote pairs and gas](docs/QUOTE-PAIRS.md).
+
+Validation: 366 tests, TypeScript and the Dokploy production build passed. Read-only mainnet quotes found routes for USDT, NVDAB, pPOLY, xKLSH and oANTHROPIC; Flap launch simulations accepted 2% BNB, USDT and pPOLY pairs. No mainnet transactions or paid provider calls were made. The gVisor job runtime still requires verification on its deployment host. Redeploy web, signer and worker together, preserving their database volumes; migrations 0032–0034 run on web startup.

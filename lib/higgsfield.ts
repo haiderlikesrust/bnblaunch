@@ -121,4 +121,22 @@ const VIDEO_MODELS={
  kling:{path:'/kling-video/v3.0/std/image-to-video',body:(image:string,prompt:string)=>({image_url:image,prompt:prompt.slice(0,2500),duration:5,sound:'on',cfg_scale:0.5})},
  seedance:{path:'/bytedance/seedance-2.0/image-to-video',body:(image:string,prompt:string)=>({image_url:image,prompt:prompt||'Subtle natural motion.',duration:5,resolution:'720p',generate_audio:true})},
 };
-export function videoModel(){return VIDEO_MODELS[env.HIGGSFIELD_VIDEO_MODEL==='seedance'?'seedance':'kling'];}
+export type VideoConfig={model:'kling'|'seedance'}|{model:'genjutsu';referenceUrl:string;resolution:'480p'|'720p'|'1080p'};
+// Snapshot these settings when reserving credit, not when dispatching later.
+export function videoConfig():VideoConfig|null{
+ const model=env.HIGGSFIELD_VIDEO_MODEL?.trim()||'kling';
+ if(model==='kling'||model==='seedance')return {model};
+ if(model!=='genjutsu')return null;
+ const referenceUrl=safeMediaUrl(env.HIGGSFIELD_MOTION_REFERENCE_URL?.trim());
+ const resolution=env.HIGGSFIELD_GENJUTSU_RESOLUTION?.trim()||'720p';
+ if(!referenceUrl||!['480p','720p','1080p'].includes(resolution))return null;
+ return {model,referenceUrl,resolution:resolution as '480p'|'720p'|'1080p'};
+}
+export function videoModel(config:VideoConfig){
+ if(config.model!=='genjutsu')return VIDEO_MODELS[config.model];
+ if(!safeMediaUrl(config.referenceUrl)||!['480p','720p','1080p'].includes(config.resolution))throw new HiggsfieldRejected(400);
+ return {path:'/higgsfield/genjutsu/motion-transfer/v1.0',body:(image:string,prompt:string)=>({
+  video_url:config.referenceUrl,image_urls:[image],resolution:config.resolution,
+  prompt:('Transfer the source performance to the referenced fictional character. Preserve its identity and the source motion and timing. '+prompt).slice(0,10000),
+ })};
+}

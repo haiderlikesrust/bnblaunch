@@ -1,8 +1,12 @@
 import { z } from 'zod';
-import { parseEther, ContractFunctionRevertedError, BaseError, type Address, type Hex, type PublicClient } from 'viem';
+import { parseEther, parseUnits, ContractFunctionRevertedError, BaseError, type Address, type Hex, type PublicClient } from 'viem';
 import { AppError } from './server';
 
 export class LaunchPendingError extends AppError {}
+export function parseQuoteBuy(value:string,decimals:number){
+ if(!/^(0|[1-9]\d*)(\.\d+)?$/.test(value)||(value.split('.')[1]?.length??0)>decimals)throw new AppError(400,`The selected pair token supports at most ${decimals} decimal places.`);
+ const amount=parseUnits(value,decimals);if(amount>=2n**256n)throw new AppError(400,'Developer buy is too large.');return amount;
+}
 
 const NOT_FOUND=['TransactionReceiptNotFoundError','TransactionNotFoundError'];
 const notFound=(error:unknown)=>error instanceof BaseError&&!!error.walk(e=>e instanceof Error&&NOT_FOUND.includes(e.name));
@@ -15,7 +19,7 @@ export async function launchTransactionState(client:Pick<PublicClient,'getTransa
  return code&&code!=='0x'?'replaced':'missing';
 }
 
-export const initialBuyBnb=z.string().max(80).regex(/^(0|[1-9]\d*)(\.\d{1,18})?$/, 'Enter a non-negative BNB amount with at most 18 decimal places.').refine(value=>{
+export const initialBuyBnb=z.string().max(80).regex(/^(0|[1-9]\d*)(\.\d{1,18})?$/, 'Enter a non-negative developer-buy amount with at most 18 decimal places.').refine(value=>{
  try{return parseEther(value)<2n**256n}catch{return false}
 },'Developer buy amount is too large.').default('0');
 

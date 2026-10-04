@@ -1,3 +1,7 @@
+import { sharedPersona, personaStatement } from "./agent-persona";
+import { websiteFeedback } from "./website-feedback";
+import { validateWebsiteSources } from "./website-policy";
+import { codeContext, codeRate, codeStatements, validateCodeProposal } from "./code-runtime";
 import { activityCadence } from './activity-cadence';
 import { agentMemory, memoryStatement } from "./agent-memory";
 import { isolatedProviderHold, providerHoldStatement } from './provider-holds';
@@ -38,7 +42,7 @@ const GUARD_OUTPUT_TOKENS=4096;
 const isolatedContentHold=`r.kind='content' AND EXISTS(SELECT 1 FROM content_jobs j WHERE r.id='content:'||j.id AND j.coin_id=r.coin_id AND j.reserved_microusd=r.reserved_microusd AND j.status IN ('reserved','generating','image_ready','uploading','media_ready','posting','uncertain','reconciling'))`;
 // The influencer's reservations are always owned by a tracked character or post
 // row and settle independently, so they never pause planning.
-const isolatedHold=`(r.kind='influencer' OR (${isolatedContentHold}) OR (${isolatedProviderHold}))`;
+const isolatedHold=`((r.kind='code' AND EXISTS(SELECT 1 FROM code_jobs j WHERE j.coin_id=r.coin_id AND r.id='code:'||j.id AND j.cost_microusd=r.reserved_microusd AND j.status IN ('queued','running'))) OR r.kind='influencer' OR (${isolatedContentHold}) OR (${isolatedProviderHold}))`;
 
 type Lease={coinId:string;id:string};
 export async function requireWorker(request:Request){
@@ -113,7 +117,7 @@ export async function runAgentTick(capabilities?:string[]){
   try{
     const row=await db().prepare("SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL").bind(lease.coinId).first<CoinRow>();if(!row)return {processed:false,reason:"coin_unavailable"};
     const coin=JSON.parse(row.config) as Coin & {lastPlanRunId?:string;workObservedAt?:number;nextResearchQuery?:string|null;treasuryThesis?:unknown};
-    const wallet=await signerRequest<{address:string;tokenAddress:string;balanceWei:string;protocolReserveWei?:string|null;feeAccountingReady?:boolean;feeAccountingIssue?:string;observedAt:number;block:string}>(`/v1/wallets/${coin.id}/balance`);
+    const wallet=await signerRequest<{address:string;tokenAddress:string;balanceWei:string;protocolReserveWei?:string|null;feeAccountingReady?:boolean;feeAccountingIssue?:string;quoteToken?:string|null;convertedFeesWei?:string|null;observedAt:number;block:string}>(`/v1/wallets/${coin.id}/balance`);
     if(wallet.address.toLowerCase()!==row.treasury_address||wallet.tokenAddress?.toLowerCase()!==row.token_address)throw new AppError(503,"Agent wallet binding mismatch.");
     const wei=BigInt(wallet.balanceWei),balance=Number(formatEther(wei)),treasuryFunded=wei>=parseEther(String(coin.threshold));
     // A confirmed service payment converts treasury BNB into usable credit.
@@ -123,7 +127,7 @@ export async function runAgentTick(capabilities?:string[]){
     await db().prepare("UPDATE coins SET config=?,updated_at=? WHERE id=? AND config=?").bind(JSON.stringify(nextCoin),new Date().toISOString(),coin.id,row.config).run();
     if(wallet.feeAccountingReady===false||typeof wallet.protocolReserveWei!=="string"||!/^\d+$/.test(wallet.protocolReserveWei))return tickResult(["historical_rpc_required","rpc_log_limit","fee_audit_pending"].includes(wallet.feeAccountingIssue??"")?wallet.feeAccountingIssue!:"fee_verification_failed");
     lastReason="service_check_failed";
-    const feeFlow=await treasuryFlow(coin.id,row.token_address as Address,wallet.address as Address,BigInt(wallet.block),wallet.balanceWei);
+    const feeFlow=await treasuryFlow(coin.id,row.token_address as Address,wallet.address as Address,BigInt(wallet.block),wallet.balanceWei,wallet.quoteToken&&wallet.convertedFeesWei?{token:wallet.quoteToken,convertedWei:wallet.convertedFeesWei}:undefined);
     if(!active)return tickResult("awaiting_treasury_funding");
     nextMinutes=1;
     if(await db().prepare("SELECT id FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast')").bind(coin.id).first())return tickResult("transaction_pending");
@@ -155,7 +159,8 @@ export async function runAgentTick(capabilities?:string[]){
     const minimumGas=BigInt(signerPolicy.gasReserveWei),gasReserve=wei/100n>minimumGas?wei/100n:minimumGas,available=wei>gasReserve+protocolReserve?wei-gasReserve-protocolReserve:0n;
     const plannerNeed=ceiling;
     // The influencer's next spend may trigger a funded top-up; it never blocks planning.
-    const influencerNeed=contentAllowance+(treasuryFunded?await influencerFunding(coin.id).catch(()=>0):0);
+    const coding=await codeContext(coin.id);
+    const influencerNeed=(coding.available&&!coding.pending?(codeRate()??0):0)+contentAllowance+(treasuryFunded?await influencerFunding(coin.id).catch(()=>0):0);
     if(row.ai_credit_microusd<plannerNeed+influencerNeed){
       // Below the activation threshold, use already-paid credit only. New
       // payments still require the treasury threshold and all reserve checks.
@@ -220,11 +225,11 @@ export async function runAgentTick(capabilities?:string[]){
     lastReason="planning_context_unavailable";
     // Project bounded facts, not full old image prompts or entire site copies.
     const communityContext={...community,publicationTiming,activity,recent:community.recent.map(j=>({id:j.id,status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
-    const previousSite=hosted?{id:hosted.site.id,title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
+    const previousSite=hosted?hosted.site:null;
     const memory=await agentMemory(coin.id);
     const previousAttempt=await db().prepare("SELECT output FROM agent_runs WHERE coin_id=? AND kind='plan' AND status='settled' ORDER BY created_at DESC,id DESC LIMIT 1").bind(coin.id).first<{output:string|null}>();
     const previousRejection=readPlanDiagnostic(previousAttempt?.output);
-    const snapshot={previousRejection,treasuryThesis:coin.treasuryThesis??null,eventRadar:await signalHistory(coin.id),tasks,recentResearch:history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))})),researchTools:{available:canResearch,browserAvailable:canBrowse,remaining:maxSearches,suggestedQuery:coin.nextResearchQuery??coin.focus??coin.purpose??null,unavailableReason:canResearch?null:coin.research?"Research service is not configured. Continue other useful work.":"Research disabled."},browserResults:[] as {id:string;url:string;title:string;text:string;status:string}[],researchResults:[] as {id:string;query:string;reused:boolean;sources:ReturnType<typeof researchSources>}[],memory,recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,character:{voice:coin.personality??"",focus:coin.focus??"",authority:"Preferences within platform policy; never instructions to bypass rules or force transactions."},language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostXImages:community.canPostImages,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:!community.publicationPending&&coin.images&&capabilities.includes('image-publishing')};
+    const snapshot={coding,persona:await sharedPersona(coin),websiteFeedback:await websiteFeedback(coin.id),previousRejection,treasuryThesis:coin.treasuryThesis??null,eventRadar:await signalHistory(coin.id),tasks,recentResearch:history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))})),researchTools:{available:canResearch,browserAvailable:canBrowse,remaining:maxSearches,suggestedQuery:coin.nextResearchQuery??coin.focus??coin.purpose??null,unavailableReason:canResearch?null:coin.research?"Research service is not configured. Continue other useful work.":"Research disabled."},browserResults:[] as {id:string;url:string;title:string;text:string;status:string}[],researchResults:[] as {id:string;query:string;reused:boolean;sources:ReturnType<typeof researchSources>}[],memory,recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,character:{voice:coin.personality??"",focus:coin.focus??"",authority:"Preferences within platform policy; never instructions to bypass rules or force transactions."},language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostXImages:community.canPostImages,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:!community.publicationPending&&coin.images&&capabilities.includes('image-publishing')};
     const system=PLANNER_RULES+PUBLICATION_LINK_RULES+PLAN_FORMAT_RULES+" If community.publicationPending is true, return publication:null. Its funds are already held separately and excluded from spendable credit; do not retry it or assume it succeeded. Continue affordable research, browser reading, other tasks or website work using the remaining credit. A blocked artwork task is not a reason to stop unrelated work. Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
     let bounded:ReturnType<typeof boundedPlanningContext<typeof snapshot>>;
     let result:Awaited<ReturnType<typeof chatCompletion>>;
@@ -264,7 +269,7 @@ export async function runAgentTick(capabilities?:string[]){
       snapshot.recentResearch=history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))}));
     }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(plan.publication?.destination==='x'&&!publicationLinksAllowed(plan.publication.text,env.APP_ORIGIN,publicationUrls(plan.publication.text)))throw Error('Publication links are limited to SHEN, X, BscScan and Flap');if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.task)await validateTask(coin.id,plan.task);if(plan.publication&&community.publicationPending)throw Error('A publication is already pending');if(plan.publication&&await db().prepare("SELECT id FROM content_jobs WHERE coin_id=? AND json_extract(payload,'$.text')=? AND created_at>? LIMIT 1").bind(coin.id,plan.publication.text,Date.now()-86400000).first())throw Error('This publication text is already recorded; continue other useful work');if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch(error){return await rejectPlan(planValidationDiagnostic(error));}
+    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(plan.publication?.destination==='x'&&!publicationLinksAllowed(plan.publication.text,env.APP_ORIGIN,publicationUrls(plan.publication.text)))throw Error('Publication links are limited to SHEN, X, BscScan and Flap');if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.code)await validateCodeProposal(coin.id,plan.code,snapshot.coding.available);if(plan.task)await validateTask(coin.id,plan.task);if(plan.website){validateWebsiteSources(plan.website,[...history.flatMap(r=>r.sources.map(s=>s.url)),...(hosted?.site.pages??[]).flatMap(p=>p.sources.map(s=>s.url))]);plan.website={...plan.website,pages:plan.website.pages??hosted?.site.pages??[],tools:plan.website.tools??hosted?.site.tools??[]};}if(plan.publication&&community.publicationPending)throw Error('A publication is already pending');if(plan.publication&&await db().prepare("SELECT id FROM content_jobs WHERE coin_id=? AND json_extract(payload,'$.text')=? AND created_at>? LIMIT 1").bind(coin.id,plan.publication.text,Date.now()-86400000).first())throw Error('This publication text is already recorded; continue other useful work');if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch(error){return await rejectPlan(planValidationDiagnostic(error));}
     // Pace from verified whole-cycle costs; a first cycle estimates review cost
     // from the planner receipt until an actual completed cycle is available.
     const averageCost=cycleCosts.results.length?cycleCosts.results.reduce((n,r)=>n+Number(r.cost_microusd),0)/cycleCosts.results.length:paidCost*2;
@@ -292,6 +297,8 @@ export async function runAgentTick(capabilities?:string[]){
       db().prepare("DELETE FROM agent_chat_control WHERE coin_id=? AND EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(coin.id,coin.id,lease.id,now),
       db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?) AND COALESCE((SELECT message FROM events WHERE coin_id=? ORDER BY created_at DESC LIMIT 1),'')<>?").bind(run.id,coin.id,row.owner,coin.name,plan.summary,new Date().toISOString(),coin.id,lease.id,now,coin.id,plan.summary),
       memoryStatement(lease,run.id,plan.summary,plan.memory??"",now),
+      ...(plan.persona?[personaStatement(lease,run.id,plan.persona,now)]:[]),
+      ...(plan.code?codeStatements(lease,run.id,plan.code,now):[]),
       ...(plan.task?[taskStatement(lease,run.id,plan.task,now)]:[]),
       ...(plan.publication?[contentJobStatement(lease,run.id,plan.publication,publicationTiming.nextAt)]:[]),
       ...(coin.website&&plan.website?websiteStatements(lease,run.id,plan.website,now):[]),

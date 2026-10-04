@@ -18,6 +18,18 @@ function fixture(){
 test('15% uses exact cumulative integer accounting and rejects over-spend',()=>{
  assert.deepEqual(protocolAllocation(101n,10n),{accrued:15n,due:5n});assert.throws(()=>protocolAllocation(100n,16n));
 });
+test('non-BNB fees reserve fifteen percent of realized BNB only, never raw quote units or creator gas',async()=>{
+ const f=fixture();try{
+  const asset='0x4444444444444444444444444444444444444444';f.store.bindQuote(f.coinId,asset);
+  const read=f.engine.client.readContract;let converted=10000n;
+  f.engine.client.readContract=async args=>args.functionName==='getQuoteToken'?asset:args.functionName==='feeConfigV2'?{...(await read(args)),isWeth:false}:read(args);
+  f.engine.conversions={realized:async()=>converted};
+  const first=await f.fees.quote(f.wallet);assert.equal(first.distributedQuoteUnits,'1000000000000000000');assert.equal(first.distributedFeesWei,'10000');assert.equal(first.reserveWei,'1500');
+  converted=20000n;assert.equal((await f.fees.quote(f.wallet)).reserveWei,'3000');
+  f.engine.client.readContract=async args=>args.functionName==='getQuoteToken'?token:args.functionName==='feeConfigV2'?{...(await read(args)),isWeth:false}:read(args);
+  await assert.rejects(f.fees.quote(f.wallet),/Fee asset changed/);
+ }finally{f.store.close()}
+});
 test('confirmed marketing fees accrue once; wallet deposits are never classified as fees',async()=>{
  const f=fixture();try{
   const first=await f.fees.quote(f.wallet);assert.equal(first.reserveWei,'150000000000000000');

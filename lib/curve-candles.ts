@@ -17,13 +17,14 @@ export function decodeCurveLog(log:Log,token:string):CurveTrade|'migration'|null
  if(event.args.amount<=0n||event.args.eth<=0n||event.args.ts<=0n||event.args.ts>BigInt(Math.floor(Date.now()/1000)+60))return null;
  return {id:log.transactionHash+':'+log.logIndex,block:Number(log.blockNumber),blockHash:log.blockHash,time:Number(event.args.ts),logIndex:log.logIndex,tokenWei:event.args.amount.toString(),quoteWei:event.args.eth.toString(),side:event.eventName==='TokenBought'?'buy':'sell',hash:log.transactionHash};
 }
-export function curveCandles(trades:CurveTrade[]):Candle[]{
+export function curveCandles(trades:CurveTrade[],quoteDecimals=18):Candle[]{
+ if(!Number.isInteger(quoteDecimals)||quoteDecimals<0||quoteDecimals>36)throw Error("Invalid quote decimals");
  const groups=new Map<number,Candle>();
  for(const t of [...trades].sort((a,b)=>a.block-b.block||a.logIndex-b.logIndex)){
-  // SHEN's independently verified Flap V6 token and native BNB both have 18
-  // decimals. Prices are actual quote/token execution ratios, never invented
+  // Launch tokens have 18 decimals; quote decimals come from the verified
+  // launch metadata. Prices are actual execution ratios, never invented
   // historical USD conversions or interpolated empty intervals.
-  const price=Number(t.quoteWei)/Number(t.tokenWei),volume=Number(t.quoteWei)/1e18,time=Math.floor(t.time/300)*300;
+  const price=Number(t.quoteWei)/Number(t.tokenWei)*10**(18-quoteDecimals),volume=Number(t.quoteWei)/10**quoteDecimals,time=Math.floor(t.time/300)*300;
   if(!Number.isFinite(price)||price<=0||!Number.isFinite(volume)||volume<=0)continue;
   const c=groups.get(time);if(c){c.high=Math.max(c.high,price);c.low=Math.min(c.low,price);c.close=price;c.volume+=volume;}else groups.set(time,{time,open:price,high:price,low:price,close:price,volume});
  }return [...groups.values()].sort((a,b)=>a.time-b.time).slice(-100);

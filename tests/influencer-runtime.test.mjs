@@ -35,6 +35,7 @@ function fixture({connected=true,startCredit=5000000}={}){
    if(method==='POST'){
     const key=init.headers['Idempotency-Key'];calls.submits.push({path,key,body:JSON.parse(init.body)});
     if(state.timeoutSubmitOnce){state.timeoutSubmitOnce=false;throw new TypeError('socket hang up');}
+    if(state.rejectVideo&&key.endsWith(':video'))return new Response('{}',{status:400});
     if(state.rejectStatus)return new Response('{}',{status:state.rejectStatus});
     return json({status:'queued',request_id:'req-'+key.replace(/[^A-Za-z0-9-]/g,'-').slice(-60)});
    }
@@ -165,4 +166,46 @@ test('a lost media upload retains its possible charge without marking it spent o
   const hold=f.sql.prepare("SELECT reserved_microusd FROM agent_runs WHERE kind='provider_hold'").get();
   assert.equal(hold.reserved_microusd,5000);assert.equal(f.credit()+f.post().cost_microusd+hold.reserved_microusd,4500000);
  }finally{env.INFLUENCER_VIDEO_PERCENT='100';f.close();}
+});
+
+
+test('the coin artwork supplies the identity when no separate reference is uploaded',async()=>{
+ const f=fixture();try{
+  f.sql.prepare("INSERT INTO coin_images(coin_id,mime,base64) VALUES('coin','image/png',?)").run(png.toString('base64'));
+  await f.doConnect();await f.drive(10);
+  assert.equal(f.influencer().status,'active');assert.equal(f.calls.storage,1);
+  assert.deepEqual(f.calls.trainedOn,['https://cdn.higgsfield.test/reference.png']);
+  assert.equal(f.calls.submits.find(s=>s.path==='/higgsfield-ai/soul/v2/standard').body.custom_reference_id,CHARACTER);
+  assert.equal(f.credit(),4500000,'character setup is charged once');
+ }finally{f.close()}
+});
+
+test('Genjutsu snapshots the motion source and charges the reserved clip tariff once',async()=>{
+ const f=fixture();env.HIGGSFIELD_VIDEO_MODEL='genjutsu';env.HIGGSFIELD_MOTION_REFERENCE_URL='https://cdn.example.com/motion.mp4';
+ try{
+  await readyCharacter(f);await f.drive(1);
+  assert.equal(JSON.parse(f.post().billing).videoConfig.model,'genjutsu');
+  env.HIGGSFIELD_VIDEO_MODEL='kling';env.HIGGSFIELD_MOTION_REFERENCE_URL='https://cdn.example.com/other.mp4';env.HIGGSFIELD_VIDEO_COST_MICROUSD='900000';
+  await f.drive(12);
+  const video=f.calls.submits.find(s=>s.key.endsWith(':video'));
+  assert.equal(video.path,'/higgsfield/genjutsu/motion-transfer/v1.0');assert.equal(video.body.video_url,'https://cdn.example.com/motion.mp4');
+  assert.deepEqual(video.body.image_urls,['https://cdn.higgsfield.test/image.png']);
+  assert.equal(f.post().status,'complete');assert.equal(f.calls.posts,1);assert.equal(f.credit(),4500000-481000);assert.equal(f.reserved(),0);
+  await f.drive(2);assert.equal(f.credit(),4500000-481000,'another worker pass cannot settle twice');
+ }finally{delete env.HIGGSFIELD_VIDEO_MODEL;delete env.HIGGSFIELD_MOTION_REFERENCE_URL;env.HIGGSFIELD_VIDEO_COST_MICROUSD='400000';f.close()}
+});
+
+test('missing Genjutsu motion input keeps photo posts available without a video charge',async()=>{
+ const f=fixture();env.HIGGSFIELD_VIDEO_MODEL='genjutsu';try{
+  await readyCharacter(f);await f.drive(10);
+  assert.equal(f.post().kind,'photo');assert.equal(f.post().status,'complete');assert.equal(f.calls.submits.some(s=>s.key.endsWith(':video')),false);
+  assert.equal(f.credit(),4500000-81000);assert.equal(f.reserved(),0);
+ }finally{delete env.HIGGSFIELD_VIDEO_MODEL;f.close()}
+});
+
+test('a rejected video submission publishes the completed photo and refunds the video allowance',async()=>{
+ const f=fixture();try{await readyCharacter(f);f.state.rejectVideo=true;await f.drive(12);
+  assert.equal(f.post().status,'complete');assert.equal(f.post().kind,'photo');assert.equal(f.calls.posts,1);
+  assert.equal(f.credit(),4500000-81000);assert.equal(f.reserved(),0);
+ }finally{f.close()}
 });

@@ -26,6 +26,7 @@ export class WalletStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS metadata (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS wallets (coin_id TEXT PRIMARY KEY,address TEXT UNIQUE NOT NULL,sealed_key TEXT NOT NULL,token_address TEXT UNIQUE,launch_hash TEXT UNIQUE,lock_id TEXT,lock_until INTEGER,created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS wallet_quotes (coin_id TEXT PRIMARY KEY REFERENCES wallets(coin_id),quote_token TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS intents (id TEXT PRIMARY KEY,coin_id TEXT NOT NULL REFERENCES wallets(coin_id),request TEXT NOT NULL,kind TEXT NOT NULL,amount_wei TEXT NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL,raw_tx TEXT,tx_hash TEXT UNIQUE,nonce INTEGER,gas_wei TEXT,receipt_block TEXT,receipt_hash TEXT,signed_at INTEGER,created_at INTEGER NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS intents_wallet_nonce ON intents(coin_id,nonce);
       CREATE UNIQUE INDEX IF NOT EXISTS intents_pending_wallet ON intents(coin_id) WHERE status IN ('signed','broadcast');
@@ -52,7 +53,12 @@ export class WalletStore {
     cipher.setAAD(Buffer.from(aad)); cipher.setAuthTag(tag);
     return Buffer.concat([cipher.update(Buffer.from(box.ciphertext, 'base64')), cipher.final()]).toString('utf8');
   }
-  wallet(id) { return this.db.prepare('SELECT * FROM wallets WHERE coin_id=?').get(id); }
+  wallet(id) { return this.db.prepare('SELECT w.*,q.quote_token FROM wallets w LEFT JOIN wallet_quotes q ON q.coin_id=w.coin_id WHERE w.coin_id=?').get(id); }
+  bindQuote(id,quote){
+    if(!isAddress(quote))throw Error('Invalid quote token');
+    this.db.prepare('INSERT INTO wallet_quotes(coin_id,quote_token) VALUES(?,?) ON CONFLICT(coin_id) DO NOTHING').run(id,quote.toLowerCase());
+    if(this.wallet(id).quote_token!==quote.toLowerCase())throw Error('Quote binding is permanent');
+  }
   provision(coinId) {
     if (!UUID.test(coinId)) throw Error('Invalid coin ID');
     this.db.exec('BEGIN IMMEDIATE');
@@ -84,7 +90,7 @@ export class WalletStore {
   intent(id) { return this.db.prepare('SELECT * FROM intents WHERE id=?').get(id); }
   expireUnsigned(id) { this.db.prepare("UPDATE intents SET status='expired' WHERE id=? AND status='created' AND expires_at<=?").run(id,Date.now()); }
   createIntent({ id, coinId, kind, amountWei, expiresAt }) {
-    if (!UUID.test(id) || !UUID.test(coinId) || !['compute', 'buyback', 'burn', 'reward'].includes(kind) || !/^\d{1,78}$/.test(amountWei) || BigInt(amountWei) <= 0n) throw Error('Invalid intent');
+    if (!UUID.test(id) || !UUID.test(coinId) || !['compute', 'buyback', 'burn', 'reward','convert_approve','convert_reset','convert_swap','convert_unwrap'].includes(kind) || !/^\d{1,78}$/.test(amountWei) || BigInt(amountWei) <= 0n) throw Error('Invalid intent');
     const request = JSON.stringify({ coinId, kind, amountWei });
     const prior = this.intent(id);
     if (prior) { if (prior.request !== request) throw Error('Intent is immutable'); return prior; }
@@ -105,7 +111,7 @@ export class WalletStore {
   pending(coinId) { return this.db.prepare("SELECT * FROM intents WHERE coin_id=? AND status IN ('signed','broadcast')").get(coinId); }
   recentSpend(coinId) {
     return this.db.prepare("SELECT amount_wei,kind,gas_wei,status FROM intents WHERE coin_id=? AND signed_at>?").all(coinId, Date.now() - 86400000)
-      .reduce((sum, r) => sum + (r.kind === 'burn'||r.status==='reverted' ? 0n : BigInt(r.amount_wei)) + BigInt(r.gas_wei ?? 0), 0n);
+      .reduce((sum, r) => sum + (r.kind === 'burn'||r.kind.startsWith('convert_')||r.status==='reverted' ? 0n : BigInt(r.amount_wei)) + BigInt(r.gas_wei ?? 0), 0n);
   }
   async persistSigned(id, fence, raw, expected) {
     const row = this.intent(id), wallet = row && this.wallet(row.coin_id);

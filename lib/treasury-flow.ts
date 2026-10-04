@@ -6,7 +6,7 @@ import { PORTAL } from '../shared/flap-contract.mjs';
 const WBNB='0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
 const tokenAbi=parseAbi(['function taxProcessor() view returns(address)']);
 const processorAbi=parseAbi([
- 'function taxToken() view returns(address)','function marketAddress() view returns(address)','function weth() view returns(address)',
+ 'function getQuoteToken() view returns(address)','function taxToken() view returns(address)','function marketAddress() view returns(address)','function weth() view returns(address)',
  'function feeConfigV2() view returns((uint16 marketBps,uint16 deflationBps,uint16 lpBps,uint16 dividendBps,uint16 feeRate,bool isWeth,uint16 commissionBps,address dividendToken))',
  'function totalQuoteSentToMarketing() view returns(uint256)','function marketQuoteBalance() view returns(uint256)',
 ]);
@@ -28,7 +28,8 @@ export async function continuousRouting(client:ReturnType<typeof chainClient>,to
  }
  return true;
 }
-export async function readFeeSample(client:ReturnType<typeof chainClient>,token:Address,treasury:Address,blockNumber:bigint,balanceWei:string):Promise<FeeSample>{
+export async function readFeeSample(client:ReturnType<typeof chainClient>,token:Address,treasury:Address,blockNumber:bigint,balanceWei:string,quote?:{token:string;convertedWei:string}):Promise<FeeSample>{
+ const native=!quote||same(quote.token,zeroAddress);
  const block=await client.getBlock({blockNumber});
  const processor=await client.readContract({address:token,abi:tokenAbi,functionName:'taxProcessor',blockNumber});
  if(same(processor,zeroAddress))throw new RoutingChanged('Fee processor unavailable');
@@ -40,10 +41,11 @@ export async function readFeeSample(client:ReturnType<typeof chainClient>,token:
   client.readContract({address:processor,abi:processorAbi,functionName:'totalQuoteSentToMarketing',blockNumber}),
   client.readContract({address:processor,abi:processorAbi,functionName:'marketQuoteBalance',blockNumber}),
  ]);
- if(!same(boundToken,token)||!same(beneficiary,treasury)||!same(wrapped,WBNB)||!config.isWeth||config.marketBps!==10000||config.lpBps!==0||config.dividendBps!==0||config.deflationBps!==0)throw new RoutingChanged('Fee routing no longer matches this treasury');
+ if(!same(boundToken,token)||!same(beneficiary,treasury)||!same(wrapped,WBNB)||config.isWeth!==native||config.marketBps!==10000||config.lpBps!==0||config.dividendBps!==0||config.deflationBps!==0)throw new RoutingChanged('Fee routing no longer matches this treasury');
+ if(!native&&(!/^\d+$/.test(quote!.convertedWei)||!same(await client.readContract({address:processor,abi:processorAbi,functionName:'getQuoteToken',blockNumber}),quote!.token)))throw new RoutingChanged('Fee asset mismatch');
  const canonical=await client.getBlock({blockNumber});
  if(canonical.hash!==block.hash||Date.now()-Number(block.timestamp)*1000>120000)throw Error('Fee snapshot changed or is stale');
- return {processor:processor.toLowerCase(),blockNumber:block.number.toString(),blockHash:block.hash,observedAt:Number(block.timestamp)*1000,balanceWei,cumulativeFeesWei:total.toString(),pendingFeesWei:pending.toString()};
+ return {processor:processor.toLowerCase(),blockNumber:block.number.toString(),blockHash:block.hash,observedAt:Number(block.timestamp)*1000,balanceWei,cumulativeFeesWei:native?total.toString():quote!.convertedWei,pendingFeesWei:native?pending.toString():'0'};
 }
 export function feeWindows(samples:FeeSample[]){
  const rows=[...samples].sort((a,b)=>a.observedAt-b.observedAt),last=rows.at(-1);if(!last)return [];
@@ -55,9 +57,9 @@ export function feeWindows(samples:FeeSample[]){
   return {requestedMinutes:minutes,observedMinutes:Math.round(duration/6000)/10,fullWindow:duration>=minutes*60000,distributedWei:delta?.toString()??null,averageWeiPerHour:delta===null?null:(delta*3600000n/BigInt(duration)).toString()};
  });
 }
-export async function treasuryFlow(coinId:string,token:Address,treasury:Address,blockNumber:bigint,balanceWei:string){
+export async function treasuryFlow(coinId:string,token:Address,treasury:Address,blockNumber:bigint,balanceWei:string,quote?:{token:string;convertedWei:string}){
  try{
-  const client=chainClient(),sample=await readFeeSample(client,token,treasury,blockNumber,balanceWei);
+  const client=chainClient(),sample=await readFeeSample(client,token,treasury,blockNumber,balanceWei,quote);
   const rows=await db().prepare('SELECT processor,block_number AS blockNumber,block_hash AS blockHash,observed_at AS observedAt,balance_wei AS balanceWei,cumulative_fees_wei AS cumulativeFeesWei,pending_fees_wei AS pendingFeesWei FROM treasury_observations WHERE coin_id=? AND observed_at>=? ORDER BY observed_at').bind(coinId,sample.observedAt-172800000).all<FeeSample>();
   let history=rows.results;const previous=history.at(-1);
   if(previous){if(BigInt(previous.blockNumber)>blockNumber)return {status:'unavailable',reason:'RPC snapshot regressed',windows:[]};const canonical=await client.getBlock({blockNumber:BigInt(previous.blockNumber)});if(canonical.hash!==previous.blockHash||previous.processor!==sample.processor||BigInt(sample.cumulativeFeesWei)<BigInt(previous.cumulativeFeesWei)||!await continuousRouting(client,token,BigInt(previous.blockNumber)+1n,blockNumber)){await db().prepare('DELETE FROM treasury_observations WHERE coin_id=?').bind(coinId).run();history=[];}}

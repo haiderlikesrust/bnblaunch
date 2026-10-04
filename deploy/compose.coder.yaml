@@ -1,0 +1,24 @@
+# Deploy on a separate Linux execution host, not the wallet/database host.
+# CODE_SANDBOX_IMAGE must be a local sha256 image ID, built from target sandbox.
+services:
+  coder:
+    build:
+      context: ..
+      dockerfile: services/coder/Dockerfile
+      target: controller
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    pids_limit: 64
+    ports: ["127.0.0.1:8092:8092"]
+    environment:
+      CODE_RUNNER_TOKEN: ${CODE_RUNNER_TOKEN:?Set a dedicated token of at least 40 characters}
+      CODE_SANDBOX_IMAGE: ${CODE_SANDBOX_IMAGE:?Set the pinned sandbox image ID}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - code-journal:/data
+volumes:
+  code-journal:

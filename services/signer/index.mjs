@@ -8,6 +8,7 @@ import { DomainFunding } from './domain-funding.mjs';
 import { WalletStore, authenticate } from './store.mjs';
 import { Campaigns } from './campaigns.mjs';
 import { SigningEngine } from './engine.mjs';
+import { QuoteConversions } from './quote-conversion.mjs';
 import { ProtocolFees } from './protocol-fees.mjs';
 import { walletBalanceSnapshot } from './balance.mjs';
 
@@ -35,6 +36,7 @@ if(shenTokenAddress&&(!isAddress(shenTokenAddress)||shenTokenAddress.toLowerCase
 engine.policy.shenTokenAddress=shenTokenAddress;
 const protocolFees=new ProtocolFees(store,engine,campaigns);
 engine.protocolFees=protocolFees;
+const conversions=new QuoteConversions(store,engine);engine.conversions=conversions;
 const domainFundingEnabled=env.DOMAIN_AUTO_FUNDING_ENABLED==='true';
 if(domainFundingEnabled&&(!env.BASE_RPC_URL||new URL(env.BASE_RPC_URL).protocol!=='https:'||!env.PORKBUN_API_KEY||!env.PORKBUN_SECRET_KEY))throw Error('Domain funding requires HTTPS Base RPC and Porkbun credentials');
 const baseClient=createPublicClient({chain:base,transport:http(env.BASE_RPC_URL??'https://mainnet.base.org',{timeout:12000,retryCount:1})});
@@ -55,14 +57,15 @@ const server=createServer(async(req,res)=>{
   try{
     if(path==='/v1/status'&&req.method==='GET') {
       await engine.chainReady();
-      return send(res,200,{chainId:56,signingReady:true,domainFundingEnabled,workerAuthorized:worker,custody:'dedicated-agent-wallets',requiresDeveloperApproval:false,settlementAddress,gasReserveWei:engine.policy.gasReserveWei.toString(),buybacksEnabled:engine.policy.buybacksEnabled});
+      return send(res,200,{chainId:56,signingReady:true,domainFundingEnabled,workerAuthorized:worker,custody:'dedicated-agent-wallets',requiresDeveloperApproval:false,settlementAddress,gasReserveWei:engine.policy.gasReserveWei.toString(),maxGasPriceWei:engine.policy.maxGasPriceWei.toString(),buybacksEnabled:engine.policy.buybacksEnabled});
     }
+    if(path==='/v1/conversions/tick'&&worker&&req.method==='POST'){exact(await body(req),[]);return send(res,200,await conversions.tick());}
     if(path==='/v1/protocol/tick'&&worker&&req.method==='POST'){exact(await body(req),[]);return send(res,200,await protocolFees.tick());}
     const protocolRecord=path.match(/^\/v1\/wallets\/([0-9a-f-]{36})\/protocol$/i);
     if(protocolRecord&&req.method==='GET'){
-      const coinId=protocolRecord[1],fees=store.db.prepare('SELECT total_wei,checked_at FROM protocol_fees WHERE coin_id=?').get(coinId);
+      const coinId=protocolRecord[1],pair=store.wallet(coinId)?.quote_token,fees=store.db.prepare('SELECT total_wei,checked_at FROM protocol_fees WHERE coin_id=?').get(coinId);
       const rows=store.db.prepare("SELECT id FROM campaigns WHERE coin_id=? AND kind='shen_buyback_burn' ORDER BY created_at DESC LIMIT 5").all(coinId);
-      return send(res,200,{shareBps:1500,tokenAddress:shenTokenAddress,enabled:!!shenTokenAddress&&engine.policy.buybacksEnabled,fees:fees?{distributedWei:fees.total_wei,observedAt:fees.checked_at}:null,campaigns:rows.map(r=>campaigns.status(r.id))});
+      return send(res,200,{shareBps:1500,tokenAddress:shenTokenAddress,enabled:!!shenTokenAddress&&engine.policy.buybacksEnabled,fees:fees?{distributedWei:pair&&pair!==zeroAddress?(await conversions.realized(coinId)).toString():fees.total_wei,observedAt:fees.checked_at}:null,conversions:conversions.records(coinId),campaigns:rows.map(r=>campaigns.status(r.id))});
     }
     if(path==='/v1/campaigns'&&worker&&req.method==='POST')return send(res,200,{campaign:campaigns.start(await body(req))});
     const campaignRecord=path.match(/^\/v1\/campaigns\/([0-9a-f-]{36})\/record$/i);

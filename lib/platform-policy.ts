@@ -1,3 +1,3 @@
 // Platform-owned economics. Coin creators cannot override these settings.
-export const PLATFORM_POLICY={threshold:.01,taxRate:3,treasury:100,holders:0,burn:0,liquidity:0,dailyBudget:0,reserve:0,buyback:false as const};
+export const PLATFORM_POLICY={threshold:.01,taxRate:2,treasury:100,holders:0,burn:0,liquidity:0,dailyBudget:0,reserve:0,buyback:false as const};
 export function operatingFunds(input:{confirmedWei:bigint;serviceCostsWei:bigint;pendingWei:bigint;gasWei:bigint;proposedDailyWei:bigint}){for(const value of Object.values(input))if(value<0n)throw new Error("Amounts cannot be negative");const costs=input.serviceCostsWei+input.pendingWei+input.gasWei;const available=input.confirmedWei>costs?input.confirmedWei-costs:0n;return {serviceAndCommittedWei:costs,availableWei:available,plannedDailyWei:input.proposedDailyWei>available?available:input.proposedDailyWei};}

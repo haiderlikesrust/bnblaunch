@@ -14,7 +14,7 @@ export async function walletBalanceSnapshot(wallet,engine,client,protocolFees){
  const snapshot={coinId:wallet.coin_id,address:wallet.address,tokenAddress:wallet.token_address,balanceWei:balance.toString(),block:blockNumber.toString(),observedAt:Date.now()};
  try{
   const fees=await protocolFees.quote(wallet);
-  return {...snapshot,protocolReserveWei:fees.reserveWei,feeAccountingReady:true};
+  return {...snapshot,protocolReserveWei:fees.reserveWei,feeAccountingReady:true,quoteToken:fees.quoteToken??null,convertedFeesWei:fees.distributedFeesWei??null};
  }catch(error){
   // A balance is observable even when spendable fee reserves cannot be verified.
   // Never substitute zero for an unknown protocol reserve.

@@ -1,3 +1,4 @@
+import { runCodeTick } from "@/lib/code-runtime";
 import { runCurveTick } from '@/lib/curve-indexer';
 import { z } from "zod";
 import { body, db, failure, response, AppError } from "@/lib/server";
@@ -22,9 +23,10 @@ const CHEAP=new Set(['awaiting_treasury_funding','transaction_pending','provider
 // Unsigned operations expire in minutes, so they go first; long-running ones
 // rotate randomly so a few stuck campaigns cannot starve newer coins.
 export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast') ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END,random() LIMIT 30").all();return response({operations:ops.results,domainFunding:await domainFundingRequests()});}catch(e){return failure(e)}}
-const payload=z.discriminatedUnion("action",[z.object({action:z.literal("content")}).strict(),z.object({action:z.literal("index")}).strict(),z.object({action:z.literal("domains")}).strict(),z.object({action:z.literal("influencer")}).strict(),z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
+const payload=z.discriminatedUnion("action",[z.object({action:z.literal("coding")}).strict(),z.object({action:z.literal("content")}).strict(),z.object({action:z.literal("index")}).strict(),z.object({action:z.literal("domains")}).strict(),z.object({action:z.literal("influencer")}).strict(),z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
 export async function POST(request:Request){try{
   await requireWorker(request);const input=payload.parse(await body(request));
+  if(input.action==="coding")return response(await runCodeTick());
   if(input.action==="content")return response(await runContentTick());
   if(input.action==="index")return response(await runCurveTick());
   if(input.action==="domains")return response(await runDomainTick());

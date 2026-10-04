@@ -1,3 +1,5 @@
+import { sharedPersona } from "./agent-persona";
+import { PERSONA_CONTEXT_RULES } from "./persona-policy";
 import { providerHoldStatement } from './provider-holds';
 import { env } from 'cloudflare:workers';
 import { z } from 'zod';
@@ -11,12 +13,12 @@ import { matchingTweet } from './content-policy';
 import { contextBytes } from './planning-context';
 import { influencerInput, influencerBrief, type InfluencerConfig } from './influencer-options';
 import { INFLUENCER_SCRIPT_RULES, INFLUENCER_GUARD_RULES, influencerScript, captionProblem, masterPrompt, scenePrompt, influencerRates, type InfluencerRates, type InfluencerScript } from './influencer-policy';
-import { higgsfieldCredentials, submitGeneration, generation, createCharacter, characterState, uploadMedia, downloadMedia, soulImage, videoModel, SOUL_PATH, HiggsfieldRejected } from './higgsfield';
+import { higgsfieldCredentials, submitGeneration, generation, createCharacter, characterState, uploadMedia, downloadMedia, soulImage, videoModel, videoConfig, type VideoConfig, SOUL_PATH, HiggsfieldRejected } from './higgsfield';
 import type { Coin } from './model';
 
 type Influencer={coin_id:string;config:string;status:string;character_id:string|null;character_status:string|null;design_request:string|null;master_asset:string|null;master_url:string|null;reference_url:string|null;run_id:string|null;attempts:number;reserved_microusd:number;cost_microusd:number;next_attempt_at:number;next_post_at:number;last_error:string|null;created_at:number;updated_at:number};
 type Post={id:string;coin_id:string;kind:'photo'|'video';status:string;caption:string;scene:string;motion:string;image_request:string|null;video_request:string|null;image_url:string|null;video_url:string|null;still_asset:string|null;user_id:string|null;media_id:string|null;tweet_id:string|null;reserved_microusd:number;cost_microusd:number;billing:string;attempts:number;posting_at:number|null;next_attempt_at:number;error:string|null;created_at:number;updated_at:number};
-type Billing={script:number;guard:number;image:number;video:number;post:number;upload:number;read:number};
+type Billing={script:number;guard:number;image:number;video:number;post:number;upload:number;read:number;videoConfig?:VideoConfig};
 type Fence={sql:string;values:unknown[]};
 const SCRIPT_TOKENS=900,GUARD_TOKENS=300,SCRIPT_BYTES=16000,IMAGE_BYTES=15000000,VIDEO_BYTES=100000000,WRITING_ALLOWANCE=100000;
 const OPEN="('script','scripting','image_submit','image_wait','video_submit','video_wait','x_upload','uploading','x_processing','x_post','posting','uncertain','reconciling')";
@@ -35,7 +37,7 @@ export async function influencerFunding(coinId:string){
  if(!row||row.run_id)return 0;
  if(row.status==='awaiting_funds')return rates.character+rates.floor;
  if(row.status!=='active')return 0;
- try{const x=xCosts('');return rates.image+rates.video+x.post+x.upload*2+x.read*3+WRITING_ALLOWANCE+rates.floor;}catch{return 0}
+ try{const x=xCosts('');return rates.image+(videoConfig()&&rates.videoPercent>0?rates.video:0)+x.post+x.upload*2+x.read*3+WRITING_ALLOWANCE+rates.floor;}catch{return 0}
 }
 
 // Refund and settle a reservation exactly once. Every statement is fenced by
@@ -99,10 +101,17 @@ async function retryCharacter(row:Influencer,message:string,fields:InfluencerFie
  await moveInfluencer(row,{...fields,attempts:row.attempts+1,last_error:message,next_attempt_at:Date.now()+300000});return true;
 }
 
+async function characterReference(coinId:string){
+ // A creator-supplied character wins; otherwise use the actual coin artwork,
+ // not just its sampled palette. Existing trained characters remain unchanged.
+ const reference=await db().prepare("SELECT mime,base64 FROM influencer_assets WHERE coin_id=? AND kind='reference' ORDER BY created_at DESC LIMIT 1").bind(coinId).first<{mime:'image/png'|'image/jpeg'|'image/webp';base64:string}>();
+ return reference??await db().prepare('SELECT mime,base64 FROM coin_images WHERE coin_id=?').bind(coinId).first<{mime:'image/png'|'image/jpeg'|'image/webp';base64:string}>();
+}
+
 async function startCharacter(row:Influencer,coin:Coin,coinRow:CoinRow,rates:InfluencerRates){
  const now=Date.now();
  if(coin.state!=='active'||coinRow.ai_credit_microusd<rates.character+rates.floor){await moveInfluencer(row,{status:'awaiting_funds',last_error:null,next_attempt_at:now+600000});return true;}
- const runId='influencer:'+crypto.randomUUID(),reference=!!await db().prepare("SELECT id FROM influencer_assets WHERE coin_id=? AND kind='reference' LIMIT 1").bind(coin.id).first();
+ const runId='influencer:'+crypto.randomUUID(),reference=!!await characterReference(coin.id);
  const result=await db().batch([
   db().prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) SELECT ?,id,'influencer','reserved',?,? FROM coins WHERE id=? AND ai_credit_microusd>=? AND EXISTS(SELECT 1 FROM influencers WHERE coin_id=coins.id AND run_id IS NULL AND updated_at=?)").bind(runId,rates.character,new Date(now).toISOString(),coin.id,rates.character+rates.floor,row.updated_at),
   db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd-? WHERE id=? AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved')").bind(rates.character,coin.id,runId),
@@ -139,7 +148,7 @@ async function characterStep(row:Influencer,coin:Coin,config:InfluencerConfig,ra
    const request=await submitGeneration(SOUL_PATH,soulImage(masterPrompt(brief,config.notes),{characterId:row.character_id,aspect:'3:4'}),key+':master');
    await moveInfluencer(row,{design_request:request,status:'designing',next_attempt_at:now+20000});return true;
   }
-  const reference=await db().prepare("SELECT mime,base64 FROM influencer_assets WHERE coin_id=? AND kind='reference' ORDER BY created_at DESC LIMIT 1").bind(row.coin_id).first<{mime:'image/png'|'image/jpeg'|'image/webp';base64:string}>();
+  const reference=await characterReference(row.coin_id);
   if(reference&&!row.reference_url){await moveInfluencer(row,{reference_url:await uploadMedia(fromBase64(reference.base64),reference.mime),next_attempt_at:0});return true;}
   if(!reference&&!row.master_asset){
    const request=await submitGeneration(SOUL_PATH,soulImage(masterPrompt(brief,config.notes),{aspect:'3:4'}),key+':master');
@@ -171,8 +180,8 @@ async function schedulePost(row:Influencer,coin:Coin,coinRow:CoinRow,rates:Influ
  if(coin.state!=='active'){await moveInfluencer(row,{last_error:'Waiting for the agent treasury to activate.',next_attempt_at:now+600000});return true;}
  if(await db().prepare(`SELECT id FROM influencer_posts WHERE coin_id=? AND status IN ${OPEN} LIMIT 1`).bind(coin.id).first()){await deferInfluencer(row,300000);return false;}
  let prices;try{prices=await Promise.all([chatPrice(agentModel(coin.modelId).id),chatPrice(GUARDRAIL_MODEL)]);}catch{await moveInfluencer(row,{last_error:'Writing model pricing is unavailable.',next_attempt_at:now+900000});return true;}
- const x=xCosts(''),kind:'photo'|'video'=rates.video>0&&Math.random()*100<rates.videoPercent?'video':'photo';
- const billing:Billing={script:callCeiling(prices[0],SCRIPT_TOKENS,SCRIPT_BYTES),guard:callCeiling(prices[1],GUARD_TOKENS,SCRIPT_BYTES),image:rates.image,video:kind==='video'?rates.video:0,post:x.post,upload:x.upload,read:x.read};
+ const x=xCosts(''),selectedVideo=videoConfig(),kind:'photo'|'video'=selectedVideo&&rates.video>0&&Math.random()*100<rates.videoPercent?'video':'photo';
+ const billing:Billing={script:callCeiling(prices[0],SCRIPT_TOKENS,SCRIPT_BYTES),guard:callCeiling(prices[1],GUARD_TOKENS,SCRIPT_BYTES),image:rates.image,video:kind==='video'?rates.video:0,post:x.post,upload:x.upload,read:x.read,...(kind==='video'&&selectedVideo?{videoConfig:selectedVideo}:{})};
  const reserve=billing.script+billing.guard+billing.image+billing.video+billing.post+billing.upload*2+billing.read*3;
  if(coinRow.ai_credit_microusd<reserve+rates.floor){await moveInfluencer(row,{last_error:'Waiting for service credit.',next_attempt_at:now+900000});return true;}
  try{if(await xProvider(env.X_API_BEARER_TOKEN!).balance()<x.post+x.upload+x.read*3){await moveInfluencer(row,{last_error:'Platform X credit needs replenishing.',next_attempt_at:now+1800000});return true;}}
@@ -203,8 +212,8 @@ async function writePost(post:Post,coin:Coin,billing:Billing){
   db().prepare("SELECT caption FROM influencer_posts WHERE coin_id=? AND status='complete' ORDER BY created_at DESC LIMIT 6").bind(coin.id).all<{caption:string}>(),
   db().prepare("SELECT kind,created_at FROM agent_operations WHERE coin_id=? AND status='confirmed' ORDER BY created_at DESC LIMIT 3").bind(coin.id).all<{kind:string;created_at:number}>(),
  ]);
- const system=INFLUENCER_SCRIPT_RULES+'Write the caption in '+(coin.language==='zh'?'Simplified Chinese.':'English.');
- const context={format:post.kind,timeUtc:new Date().toISOString(),character:{brief:influencerBrief(config,coin),notes:config.notes},coin:{name:coin.name,symbol:coin.symbol,story:coin.description.slice(0,600),mission:(coin.purpose??'').slice(0,600),voice:(coin.personality??'').slice(0,300),focus:(coin.focus??'').slice(0,300)},verifiedUpdates:updates.results.map(u=>({kind:u.kind,status:'confirmed',at:new Date(Number(u.created_at)).toISOString()})),recentCaptions:recent.results.map(r=>r.caption)};
+ const system=PERSONA_CONTEXT_RULES+INFLUENCER_SCRIPT_RULES+'Write the caption in '+(coin.language==='zh'?'Simplified Chinese.':'English.');
+ const context={persona:await sharedPersona(coin),format:post.kind,timeUtc:new Date().toISOString(),character:{brief:influencerBrief(config,coin),notes:config.notes},coin:{name:coin.name,symbol:coin.symbol,story:coin.description.slice(0,600),mission:(coin.purpose??'').slice(0,600),voice:(coin.personality??'').slice(0,300),focus:(coin.focus??'').slice(0,300)},verifiedUpdates:updates.results.map(u=>({kind:u.kind,status:'confirmed',at:new Date(Number(u.created_at)).toISOString()})),recentCaptions:recent.results.map(r=>r.caption)};
  while(context.recentCaptions.length&&contextBytes(system,context)>SCRIPT_BYTES-500)context.recentCaptions.pop();
  const audit={coinId:coin.id,runId:'influencer:'+post.id};
  let cost=0;
@@ -241,7 +250,11 @@ async function awaitImage(post:Post,billing:Billing){
  return true;
 }
 async function submitVideo(post:Post){
- const model=videoModel();
+ const billing=JSON.parse(post.billing) as Billing;
+ // Older jobs did not snapshot their model. Finish as a photo rather than
+ // buying a newly selected provider against an old provider's reservation.
+ if(!billing.videoConfig){await movePost(post,'x_upload',{kind:'photo'});return true;}
+ const model=videoModel(billing.videoConfig);
  const request=await submitGeneration(model.path,model.body(post.image_url!,post.motion||'Subtle natural motion with a gentle camera push-in.'),post.id+':video');
  await movePost(post,'video_wait',{video_request:request},30000);return true;
 }
@@ -326,7 +339,10 @@ async function postError(post:Post,error:unknown,billing:Billing){
   return true;
  }
  if(current.status==='reconciling'){await movePost(current,'uncertain',{},60000);return true;}
- if(error instanceof HiggsfieldRejected){await finishPost(current,'failed',current.cost_microusd,`Higgsfield rejected the request (HTTP ${error.status}).`);return true;}
+ if(error instanceof HiggsfieldRejected){
+  if(current.status==='video_submit'&&current.still_asset){await movePost(current,'x_upload',{kind:'photo'});return true;}
+  await finishPost(current,'failed',current.cost_microusd,`Higgsfield rejected the request (HTTP ${error.status}).`);return true;
+ }
  if(error instanceof AppError&&error.status===412){await finishPost(current,'failed',current.cost_microusd,'The X account needs to be reconnected.');return true;}
  // Pending provider results, rate limits and token refreshes retry later;
  // the six-hour expiry bounds every pre-publication stage.

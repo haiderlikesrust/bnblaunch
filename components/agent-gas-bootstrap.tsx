@@ -1,0 +1,9 @@
+"use client";
+import {useEffect,useState} from 'react';
+import {fundAgentGas,readyWallet} from '@/lib/launch-flow';
+export default function AgentGasBootstrap({coinId}:{coinId:string}){
+ const [needed,setNeeded]=useState(false),[amount,setAmount]=useState(''),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[hash,setHash]=useState('');
+ useEffect(()=>{let alive=true;void fetch(`/api/coins/${coinId}/gas`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'peek'})}).then(async r=>{const v=await r.json() as {ready?:boolean;amountBnb?:string;error?:string};if(alive){setNeeded(!v.ready);setAmount(v.amountBnb??'');if(v.error)setMessage(v.error)}}).catch(()=>{if(alive){setNeeded(true);setMessage('Gas readiness could not be checked.')}});return()=>{alive=false}},[coinId]);
+ if(!needed)return null;
+ return <section className="panel"><h2>Fund agent gas</h2><p className="body-copy">This token is launched. Its agent needs BNB for the first quote-token conversion. {amount&&`Deposit: ${amount} BNB, plus network gas.`} This deposit goes directly to the agent and is separate from trading fees.</p><label className="form-field">Existing or replacement gas transaction hash (optional)<input value={hash} placeholder="0x…" disabled={busy} onChange={e=>setHash(e.target.value.trim())}/></label><button className="button primary" disabled={busy} onClick={async()=>{setBusy(true);setMessage('Confirming the gas deposit…');try{await readyWallet();if(hash){if(!/^0x[0-9a-fA-F]{64}$/.test(hash))throw Error("Enter a valid transaction hash.");sessionStorage.setItem("shen-agent-gas:"+coinId,hash);}await fundAgentGas(coinId);setNeeded(false)}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}}}>{busy?'Confirming…':'Fund / verify gas deposit'}</button><p role="status">{message}</p></section>;
+}

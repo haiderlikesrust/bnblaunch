@@ -2,7 +2,7 @@ import { curveMarket } from './curve-indexer';
 import { z } from 'zod';
 import { AppError, db } from './server';
 export type Candle={time:number;open:number;high:number;low:number;close:number;volume:number};
-export type MarketData={candles:Candle[];source:'GeckoTerminal'|'Flap';currency?:'USD'|'BNB';indexing?:boolean;indexedThrough?:number|null;updatedAt:number;pool?:string;lastTradeAt?:number|null;unavailable?:boolean;stale?:boolean;valuation?:{priceUsd:number|null;marketCapUsd:number|null;fullyDilutedValuationUsd:number|null;tokenLiquidityUsd:number|null;volume24hUsd:number|null}};
+export type MarketData={candles:Candle[];source:'GeckoTerminal'|'Flap';currency?:string;indexing?:boolean;indexedThrough?:number|null;updatedAt:number;pool?:string;lastTradeAt?:number|null;unavailable?:boolean;stale?:boolean;valuation?:{priceUsd:number|null;marketCapUsd:number|null;fullyDilutedValuationUsd:number|null;tokenLiquidityUsd:number|null;volume24hUsd:number|null}};
 const candle=z.tuple([z.number().int().positive(),z.number().nonnegative(),z.number().nonnegative(),z.number().nonnegative(),z.number().nonnegative(),z.number().nonnegative()]);
 export function marketNumber(value:unknown):number|null{if(typeof value!=='string'||!/^\d+(\.\d+)?$/.test(value))return null;const n=Number(value);return Number.isFinite(n)&&n<=Number.MAX_SAFE_INTEGER?n:null;}
 export function tokenMarket(payload:any,token:string,now:number):MarketData{

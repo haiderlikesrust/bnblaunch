@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { LoaderCircle, ShieldCheck, ExternalLink, Wallet, RotateCcw } from "lucide-react";
 import { confirmLaunch, LaunchConfirmationError } from "@/lib/launch-confirmation";
-import { readyWallet, prepareLaunch, sendLaunch, launchStatus, recordSubmission, rememberLaunch, rememberedLaunch, forgetLaunch } from "@/lib/launch-flow";
+import { readyWallet, prepareLaunch, sendLaunch, fundAgentGas, launchStatus, recordSubmission, rememberLaunch, rememberedLaunch, forgetLaunch } from "@/lib/launch-flow";
 import type { Coin } from "@/lib/model";
 import type { T } from "@/lib/ui";
 
@@ -26,8 +26,10 @@ export default function FlapLaunch({coin,onConfirmed,t}:{coin:Coin;onConfirmed:(
   useEffect(()=>{
     if(phase!=="confirming"||!pending)return;
     const t=tRef.current,controller=new AbortController();setMessage(t("正在 BNB 链上确认发行…","Confirming launch on BNB Chain…"));
-    void confirmLaunch({coinId:coin.id,planId:pending.planId,hash:pending.hash,signal:controller.signal,onPending:setMessage}).then(launched=>{
-      if(controller.signal.aborted)return;forgetLaunch(coin.id);setPhase("done");
+    void confirmLaunch({coinId:coin.id,planId:pending.planId,hash:pending.hash,signal:controller.signal,onPending:setMessage}).then(async launched=>{
+      if(controller.signal.aborted)return;
+      if(launched.quoteToken&&launched.quoteToken!=="0x0000000000000000000000000000000000000000"){setMessage("Token launched. Approve the separate BNB deposit for agent gas.");await fundAgentGas(coin.id);}
+      forgetLaunch(coin.id);setPhase("done");
       setMessage(t("代币已发行。资金与服务就绪后，智能体开始工作。","Token launched. The agent starts working when its treasury and operating services are ready."));confirmedRef.current(launched);
     }).catch(error=>{
       if(controller.signal.aborted)return;
@@ -60,7 +62,7 @@ export default function FlapLaunch({coin,onConfirmed,t}:{coin:Coin;onConfirmed:(
       {!readiness.ready&&<p className="body-copy" role="status">{readiness.reason}</p>}
       <div className="form-grid" style={{marginTop:22}}>{coin.imageUrl?<div className="saved-token-image span-two"><img src={coin.imageUrl} alt={coin.name+" token logo"}/><div><strong>{t("代币图片已就绪","Token artwork ready")}</strong><p>{t("发行将使用你上传的图片。","Your uploaded image will be used for the launch.")}</p></div></div>:<label className="form-field span-two">{t("代币标志 · PNG、JPEG、WebP · 小于 2 MB","Token logo · PNG, JPEG, WebP · under 2 MB")}<input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={e=>setFile(e.target.files?.[0]??null)}/></label>}</div>
       <label className="form-field" style={{marginTop:22}}>{t("代币推文链接（可选）","Coin tweet URL (optional)")}<input type="url" value={tweetUrl} placeholder="https://x.com/youraccount/status/…" maxLength={500} disabled={busy} onChange={e=>setTweetUrl(e.target.value)}/></label>
-      <label className="form-field" style={{marginTop:22}}>{t("开发者购买 · BNB（可选）","Developer buy · BNB (optional)")}<input type="text" inputMode="decimal" value={buy} disabled={busy} onChange={e=>setBuy(e.target.value.trim())}/><small>{t("保持 0 则不购买。你支付此金额与网络燃料费。","Leave at 0 to launch without buying. You pay this amount plus network gas.")}</small></label>
+      <label className="form-field" style={{marginTop:22}}>{t("开发者购买 · BNB（可选）","Developer buy · selected pair token (optional)")}<input type="text" inputMode="decimal" value={buy} disabled={busy} onChange={e=>setBuy(e.target.value.trim())}/><small>{t("保持 0 则不购买。你支付此金额与网络燃料费。","Leave at 0 to launch without buying. You pay this amount plus network gas.")}</small></label>
       <div className="subtle-note"><ShieldCheck size={17}/><span>{t(`买卖税：${coin.taxRate}%，持续 365 天。可分配费用中 85% 用于智能体，15% 用于 SHEN 回购与销毁。`,`Buy/sell tax: ${coin.taxRate}% for 365 days. Of distributable fees, 85% funds the agent and 15% funds system SHEN buybacks and burns.`)}</span></div>
       <button className="button primary" style={{marginTop:20}} disabled={busy||!readiness.ready} onClick={()=>void launch()}>{busy?<LoaderCircle className="spin" size={16}/>:<Wallet size={16}/>}{t("在 BNB 链发行","Launch on BNB Chain")}</button>
     </>}

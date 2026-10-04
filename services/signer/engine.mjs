@@ -45,16 +45,18 @@ export class SigningEngine {
     if(canonical.hash!==receipt.blockHash) throw Error('Launch receipt is not canonical');
     const {functionName,args}=decodeFunctionData({abi:portalAbi,data:tx.input});
     const p=args?.[0];
-    if(functionName!=='newTokenV6'||!p||!same(p.beneficiary,wallet.address)||p.tokenVersion!==6||p.mktBps!==10000||p.deflationBps!==0||p.dividendBps!==0||p.lpBps!==0||p.buyTaxRate!==300||p.sellTaxRate!==300||tx.value!==p.quoteAmt||p.quoteToken!==zeroAddress||p.dexId!==0||p.migratorType!==1||p.extensionID!=='0x'+'0'.repeat(64)||p.extensionData!=='0x'||p.permitData!=='0x'||p.commissionReceiver!==zeroAddress||p.dividendToken!==zeroAddress||p.taxDuration!==31536000n||p.antiFarmerDuration!==3600n) throw Error('Launch does not bind platform economics to this agent wallet');
+    if(functionName!=='newTokenV6'||!p||!same(p.beneficiary,wallet.address)||p.tokenVersion!==6||p.mktBps!==10000||p.deflationBps!==0||p.dividendBps!==0||p.lpBps!==0||![200,300].includes(p.buyTaxRate)||p.sellTaxRate!==p.buyTaxRate||tx.value!==(same(p.quoteToken,zeroAddress)?p.quoteAmt:0n)||p.dexId!==0||p.migratorType!==1||p.extensionID!=='0x'+'0'.repeat(64)||p.extensionData!=='0x'||p.permitData!=='0x'||p.commissionReceiver!==zeroAddress||!same(p.dividendToken,p.quoteToken)||p.taxDuration!==31536000n||p.antiFarmerDuration!==3600n) throw Error('Launch does not bind platform economics to this agent wallet');
     const token=getContractAddress({from:PORTAL,salt:p.salt,bytecode:'0x3d602d80600a3d3981f3363d3d373d3d3d363d73'+TAX_V3_IMPL.slice(2).toLowerCase()+'5af43d82803e903d91602b57fd5bf3',opcode:'CREATE2'});
     const code=await this.client.getCode({address:token,blockNumber:receipt.blockNumber});
     const expected='0x363d3d373d3d3d363d73'+TAX_V3_IMPL.slice(2).toLowerCase()+'5af43d82803e903d91602b57fd5bf3';
     if(!token.toLowerCase().endsWith('7777')||code?.toLowerCase()!==expected) throw Error('Flap token implementation was not verified');
     this.store.bindLaunch(coinId,token,hash);
+    this.store.bindQuote(coinId,p.quoteToken);
     return {coinId,address:wallet.address,tokenAddress:token,hash};
   }
   async requestTransaction(row, wallet) {
     const amount=BigInt(row.amount_wei),token=this.transactionToken(row,wallet);
+    if(row.kind.startsWith("convert_")){if(!this.conversions)throw Error("Conversion service unavailable");return this.conversions.transaction(row,wallet);}
     if(row.kind==='compute') {
       if(!this.policy.settlementAddress) throw Error('Settlement recipient is not configured');
       const bounds=serviceFundingBounds(this.policy.settlementAddress);
@@ -76,10 +78,10 @@ export class SigningEngine {
     if(row.kind!=='buyback')throw Error('Unsupported signing operation');
     if(!this.policy.buybacksEnabled) throw Error('Buybacks are not enabled by platform policy');
     const state=await this.client.readContract({address:PORTAL,abi:trading,functionName:'getTokenV8Safe',args:[token]});
-    if(state.tokenVersion!==6||!same(state.quoteTokenAddress,zeroAddress)||state.dexId!==0) throw Error('Unsupported token route');
+    if(state.tokenVersion!==6||(!same(state.quoteTokenAddress,zeroAddress)&&!state.nativeToQuoteSwapEnabled)||state.dexId!==0) throw Error('Unsupported token route');
     const net=quote=>quote*(10000n-state.buyTaxRate)/10000n*(10000n-BigInt(this.policy.slippageBps))/10000n;
     if(state.buyTaxRate>1000n) throw Error('Tax exceeds supported route policy');
-    if(state.status===1) {
+    if(state.status===1||(!same(state.quoteTokenAddress,zeroAddress)&&state.status===4)) {
       const quote=await this.client.simulateContract({account:wallet.address,address:PORTAL,abi:trading,functionName:'quoteExactInput',args:[{inputToken:zeroAddress,outputToken:token,inputAmount:amount}]});
       // Portal quotes already include the curve's input tax; only DEX reserve
       // quotes below need a separate output-transfer-tax deduction.
@@ -160,6 +162,7 @@ export class SigningEngine {
         const wallet=this.store.wallet(row.coin_id),token=this.transactionToken(row,wallet);
         if(receipt.status==='success'&&row.kind==='buyback'&&netReceived(receipt.logs??[],token,wallet.address)<=0n)throw Error('Buy receipt has no verified tokens received');
         if(receipt.status==='success'&&row.kind==='burn'&&netReceived(receipt.logs??[],token,BURN_SINK)!==BigInt(row.amount_wei))throw Error('Burn-sink receipt does not prove the authorized amount');
+        if(receipt.status==='success'&&row.kind.startsWith('convert_'))await this.conversions.verifyReceipt(row,wallet,receipt);
         this.store.finish(id,receipt);
       }
       return summary(this.store.intent(id));

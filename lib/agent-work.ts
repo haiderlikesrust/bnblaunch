@@ -14,7 +14,7 @@ export async function validateTask(coinId:string,task:TaskUpdate){
   if(!old){const count=await db().prepare("SELECT COUNT(*) AS n FROM agent_tasks WHERE coin_id=? AND status IN ('active','blocked')").bind(coinId).first<{n:number}>();if(Number(count?.n??0)>=3)throw Error('Active task limit reached');}
   if(task.status==='complete'){
     if(!task.evidence)throw Error('Task completion requires a receipt');
-    const queries={treasury:"SELECT id FROM agent_operations WHERE coin_id=? AND id=? AND status='confirmed' AND created_at>=?",research:"SELECT id FROM research_runs WHERE coin_id=? AND id=? AND status='complete' AND started_at>=?",browser:"SELECT id FROM browser_sessions WHERE coin_id=? AND id=? AND status='complete' AND started_at>=?",publication:"SELECT id FROM content_jobs WHERE coin_id=? AND id=? AND status='complete' AND created_at>=?",website:'SELECT id FROM site_revisions WHERE coin_id=? AND id=? AND published_at>=?'};
+    const queries={code:"SELECT id FROM code_jobs WHERE coin_id=? AND id=? AND status='complete' AND created_at>=?",treasury:"SELECT id FROM agent_operations WHERE coin_id=? AND id=? AND status='confirmed' AND created_at>=?",research:"SELECT id FROM research_runs WHERE coin_id=? AND id=? AND status='complete' AND started_at>=?",browser:"SELECT id FROM browser_sessions WHERE coin_id=? AND id=? AND status='complete' AND started_at>=?",publication:"SELECT id FROM content_jobs WHERE coin_id=? AND id=? AND status='complete' AND created_at>=?",website:'SELECT id FROM site_revisions WHERE coin_id=? AND id=? AND published_at>=?'};
     if(!await db().prepare(queries[task.evidence.kind]).bind(coinId,task.evidence.id,old!.created_at).first())throw Error('Task completion receipt is not confirmed for this task');
   }else if(task.evidence)throw Error('Only completed tasks carry completion evidence');
 }
@@ -32,6 +32,7 @@ export async function hasNewWorkResult(coinId:string,lastPlanId:unknown,observed
   const latest=await db().prepare("SELECT id,status,finished_at FROM agent_runs WHERE coin_id=? AND kind='plan' ORDER BY created_at DESC,id DESC LIMIT 1").bind(coinId).first<{id:string;status:string;finished_at:string|null}>();
   if(!latest||latest.id!==lastPlanId||latest.status!=='settled'||!latest.finished_at||Date.now()-Date.parse(latest.finished_at)<60000)return false;
   if(await db().prepare("SELECT id FROM content_jobs WHERE coin_id=? AND status IN ('complete','failed') AND updated_at>? LIMIT 1").bind(coinId,observedAt).first())return true;
+  if(await db().prepare("SELECT id FROM code_jobs WHERE coin_id=? AND status IN ('complete','failed') AND updated_at>? LIMIT 1").bind(coinId,observedAt).first())return true;
   // Market moves wake planning at most once per ten minutes: small alternating
   // trades on a thin curve must not force a paid cycle every worker pass.
   if(Date.now()-Date.parse(latest.finished_at)<600000)return false;

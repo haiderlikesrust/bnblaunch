@@ -2,7 +2,7 @@
 // prose is trimmed by actual UTF-8 size, not character count (important for 中文).
 export function contextBytes(system:string,data:unknown){return new TextEncoder().encode(JSON.stringify([{role:'system',content:system},{role:'user',content:JSON.stringify(data)}])).length;}
 // Shorten prose only: identifiers, source URLs and financial bounds stay exact.
-const prose=new Set(['mission','story','voice','focus','summary','nextSteps','goal','nextStep','message','reviewReason','reason','description','text','title','name','brief']);
+const prose=new Set(['mission','story','voice','focus','summary','nextSteps','goal','nextStep','message','reviewReason','reason','description','text','title','name','brief','output','content','premise','nextBeat']);
 function shorten(value:unknown,limit:number):void{
  if(Array.isArray(value)){for(let i=0;i<value.length;i++){shorten(value[i],limit);}return;}
  if(value&&typeof value==='object')for(const [key,item] of Object.entries(value)){if(prose.has(key)&&typeof item==='string'&&item.length>limit)(value as Record<string,unknown>)[key]=item.slice(0,limit)+'…';else shorten(item,limit);}

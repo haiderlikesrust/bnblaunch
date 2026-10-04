@@ -4,7 +4,7 @@ import { coinTweetUrl } from "./coin-tweet";
 import { connectWallet } from "./wallet-login";
 
 // Client-side launch sequence shared by the create form and the resume panel.
-export type LaunchPlan={planId:string;transaction:Record<string,string>;predictedAddress:string;treasury:string;initialBuyBnb:string;estimatedGasBnb:string};
+export type LaunchPlan={planId:string;transaction:Record<string,string>;predictedAddress:string;treasury:string;initialBuyBnb:string;quoteSymbol?:string;quoteToken?:string;estimatedGasBnb:string};
 export type LaunchStage="wallet"|"create"|"authorize"|"metadata"|"validate"|"send"|"confirm";
 export type LaunchStatus={launched:boolean;pending:{planId:string;hash:string;state:string}|null;readiness:{ready:boolean;reason:string}};
 export class LaunchFlowError extends Error{readonly code:string;readonly status:number;constructor(message:string,code="",status=0){super(message);this.code=code;this.status=status;}}
@@ -41,12 +41,13 @@ export async function readyWallet(){
  return account;
 }
 export async function prepareLaunch({coinId,hasSavedImage,file,account,buy,tweetUrl,onStage}:{coinId:string;hasSavedImage:boolean;file?:File|null;account:string;buy:string;tweetUrl:string;onStage:(stage:LaunchStage)=>void}){
- if(!/^(0|[1-9]\d*)(\.\d{1,18})?$/.test(buy))throw new LaunchFlowError("Enter a non-negative developer buy in BNB, with at most 18 decimals.");
+ if(!/^(0|[1-9]\d*)(\.\d{1,18})?$/.test(buy))throw new LaunchFlowError("Enter a non-negative developer buy in the selected pair token, with at most 18 decimals.");
  const tweet=coinTweetUrl.safeParse(tweetUrl);if(!tweet.success)throw new LaunchFlowError(tweet.error.issues[0].message);
  if(!file&&!hasSavedImage)throw new LaunchFlowError("Choose a token logo first.");
  onStage("authorize");
- const auth=await launchApi<{authorizationId:string;message:string}>(coinId,{action:"authorize",creator:account,initialBuyBnb:buy,tweetUrl:tweet.data});
+ const auth=await launchApi<{authorizationId:string;message:string;approvals?:Record<string,string>[]}>(coinId,{action:"authorize",creator:account,initialBuyBnb:buy,tweetUrl:tweet.data});
  const signature=await provider().request({method:"personal_sign",params:[stringToHex(auth.message),account]}) as string;
+ for(const transaction of auth.approvals??[]){const hash=await walletSend(transaction);await waitWalletReceipt(hash);}
  onStage("metadata");
  let pinned:Response;
  if(hasSavedImage)pinned=await fetch(`/api/coins/${encodeURIComponent(coinId)}/metadata`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({useSavedImage:true,authorizationId:auth.authorizationId})});
@@ -70,6 +71,31 @@ export async function sendLaunch(coinId:string,plan:LaunchPlan){
  rememberLaunch(coinId,plan.planId,hash);
  await recordSubmission(coinId,plan.planId,hash);
  return hash;
+}
+async function walletSend(transaction:Record<string,string>){
+ const wallet=provider(),accounts=await wallet.request({method:'eth_accounts'}) as string[];
+ if(await wallet.request({method:'eth_chainId'})!=='0x38'||accounts[0]?.toLowerCase()!==transaction.from.toLowerCase())throw new LaunchFlowError('Your wallet account or network changed. Retry.');
+ const hash=await wallet.request({method:'eth_sendTransaction',params:[transaction]}) as string;
+ if(!/^0x[a-fA-F0-9]{64}$/.test(hash))throw new LaunchFlowError('Wallet returned an invalid transaction hash.');return hash;
+}
+async function waitWalletReceipt(hash:string){
+ for(let i=0;i<80;i++){const receipt=await provider().request({method:'eth_getTransactionReceipt',params:[hash]}) as {status:string}|null;if(receipt){if(receipt.status!=='0x1')throw new LaunchFlowError('Token approval reverted.');return;}await wait(3000);}
+ throw new LaunchFlowError('Token approval is still pending. Wait for it to confirm before retrying.');
+}
+export async function fundAgentGas(coinId:string){
+ type Result={ready?:boolean;pending?:boolean;reverted?:boolean;hash?:string;transaction?:Record<string,string>;error?:string};
+ const api=async(data:unknown):Promise<Result>=>{const r=await fetch(`/api/coins/${encodeURIComponent(coinId)}/gas`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const v=await r.json() as Result;if(!r.ok)throw new LaunchFlowError(v.error??'Gas deposit verification pending. Do not send another deposit.','',r.status);return v;};
+ const storage='shen-agent-gas:'+coinId;
+ let local:string|null=null;try{local=sessionStorage.getItem(storage)}catch{}
+ if(local)try{await api({action:'submitted',hash:local});}catch(e){if(e instanceof LaunchFlowError&&e.status===400){try{sessionStorage.removeItem(storage)}catch{}}throw e;}
+ const deposit=await api({action:'prepare'});if(deposit.ready){try{sessionStorage.removeItem(storage)}catch{}return;}
+ if(!deposit.pending){
+  if(!deposit.transaction)throw new LaunchFlowError('Gas deposit could not be prepared.');
+  const hash=await walletSend(deposit.transaction);try{sessionStorage.setItem(storage,hash)}catch{}
+  await api({action:'submitted',hash});
+ }
+ for(let i=0;i<80;i++){await wait(3000);let result:Result;try{result=await api({action:'confirm'});}catch(e){if(i===79)throw e;continue;}if(result.reverted){try{sessionStorage.removeItem(storage)}catch{}throw new LaunchFlowError(result.error??'Gas deposit reverted.');}if(result.ready){try{sessionStorage.removeItem(storage)}catch{}return;}}
+ throw new LaunchFlowError('Gas deposit is still confirming. Retry verification without sending another deposit.');
 }
 // Saved server-side so any device can finish verification. Confirmation does
 // not depend on it, so a brief outage only retries.

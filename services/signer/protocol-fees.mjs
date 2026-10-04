@@ -8,7 +8,7 @@ const tokenAbi=parseAbi(['function taxProcessor() view returns(address)']);
 const processorAbi=parseAbi([
  'function taxToken() view returns(address)','function marketAddress() view returns(address)','function weth() view returns(address)',
  'function feeConfigV2() view returns((uint16 marketBps,uint16 deflationBps,uint16 lpBps,uint16 dividendBps,uint16 feeRate,bool isWeth,uint16 commissionBps,address dividendToken))',
- 'function totalQuoteSentToMarketing() view returns(uint256)',
+ 'function totalQuoteSentToMarketing() view returns(uint256)','function getQuoteToken() view returns(address)',
 ]);
 const routingEvents=parseAbi(['event TaxTokenAddressesUpdated(address indexed token,address beneficiary,address feeReceiver)','event MarketWalletChanged(address indexed token,address indexed oldMarket,address indexed newMarket)']);
 const same=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.toLowerCase();
@@ -30,6 +30,8 @@ export class ProtocolFees{
   store.db.exec("CREATE TABLE IF NOT EXISTS protocol_cursor(id INTEGER PRIMARY KEY CHECK(id=1),coin_id TEXT NOT NULL); INSERT OR IGNORE INTO protocol_cursor VALUES(1,'')");
  }
  async quote(wallet){
+  wallet=this.store.wallet(wallet.coin_id)??wallet;
+  const quoteToken=wallet.quote_token??zeroAddress,native=same(quoteToken,zeroAddress);
   if(!wallet.token_address)return {accruedWei:'0',reserveWei:'0',distributedFeesWei:'0',spentWei:'0'};
   const head=await this.engine.chainReady(),at=head.number-3n;
   const launch=await this.client.getTransactionReceipt({hash:wallet.launch_hash});
@@ -49,7 +51,8 @@ export class ProtocolFees{
    if(logs.some(rows=>rows.length))throw Error('Fee beneficiary history changed; reconciliation required');
   }
   const [bound,market,wrapped,config,total]=await Promise.all(['taxToken','marketAddress','weth','feeConfigV2','totalQuoteSentToMarketing'].map(functionName=>this.client.readContract({address:processor,abi:processorAbi,functionName,blockNumber:end})));
-  if(!same(bound,wallet.token_address)||!same(market,wallet.address)||!same(wrapped,WBNB)||!config.isWeth||config.marketBps!==10000||config.lpBps!==0||config.dividendBps!==0||config.deflationBps!==0)throw Error('Fee routing does not match the agent treasury');
+  if(!same(bound,wallet.token_address)||!same(market,wallet.address)||!same(wrapped,WBNB)||config.isWeth!==native||config.marketBps!==10000||config.lpBps!==0||config.dividendBps!==0||config.deflationBps!==0)throw Error('Fee routing does not match the agent treasury');
+  if(!native&&!same(await this.client.readContract({address:processor,abi:processorAbi,functionName:'getQuoteToken',blockNumber:end}),quoteToken))throw Error('Fee asset changed');
   if(total<0n||(prior&&total<BigInt(prior.total_wei))||(await this.client.getBlock({blockNumber:end})).hash!==block.hash)throw Error('Fee counter changed; reconciliation required');
   const values=[processor.toLowerCase(),end.toString(),block.hash,total.toString(),Date.now()];
   if(prior){
@@ -59,8 +62,9 @@ export class ProtocolFees{
   const buys=this.store.db.prepare("SELECT i.amount_wei,i.receipt_block,i.receipt_hash FROM intents i JOIN campaign_legs l ON l.id=i.id JOIN campaigns c ON c.id=l.campaign_id WHERE c.coin_id=? AND c.kind='shen_buyback_burn' AND i.kind='buyback' AND i.status='confirmed'").all(wallet.coin_id);
   const latest=buys.reduce((a,b)=>!a||BigInt(b.receipt_block??-1)>BigInt(a.receipt_block??-1)?b:a,null);
   if(latest&&(!latest.receipt_hash||latest.receipt_block===null||BigInt(latest.receipt_block)>at||(await this.client.getBlock({blockNumber:BigInt(latest.receipt_block)})).hash!==latest.receipt_hash))throw Error('Protocol purchase receipt reorganized; reconciliation required');
-  const spent=buys.reduce((sum,row)=>sum+BigInt(row.amount_wei),0n),allocation=protocolAllocation(total,spent);
-  return {accruedWei:allocation.accrued.toString(),reserveWei:allocation.due.toString(),distributedFeesWei:total.toString(),spentWei:spent.toString()};
+  const realized=native?total:await this.engine.conversions.realized(wallet.coin_id);
+  const spent=buys.reduce((sum,row)=>sum+BigInt(row.amount_wei),0n),allocation=protocolAllocation(realized,spent);
+  return {accruedWei:allocation.accrued.toString(),reserveWei:allocation.due.toString(),distributedFeesWei:realized.toString(),quoteToken,distributedQuoteUnits:total.toString(),spentWei:spent.toString()};
  }
  async tick(){
   // Round-robin, one coin per tick; existing campaigns keep their immutable ID.

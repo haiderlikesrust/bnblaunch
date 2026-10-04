@@ -1,0 +1,16 @@
+ALTER TABLE launch_authorizations ADD COLUMN quote_token TEXT NOT NULL DEFAULT '0x0000000000000000000000000000000000000000';
+ALTER TABLE launch_authorizations ADD COLUMN quote_decimals INTEGER NOT NULL DEFAULT 18;
+ALTER TABLE prepared_launches ADD COLUMN quote_token TEXT NOT NULL DEFAULT '0x0000000000000000000000000000000000000000';
+CREATE TABLE agent_gas_deposits (
+ coin_id TEXT PRIMARY KEY REFERENCES coins(id),
+ creator TEXT NOT NULL,
+ wallet TEXT NOT NULL,
+ amount_wei TEXT NOT NULL,
+ nonce INTEGER NOT NULL,
+ tx_hash TEXT UNIQUE,
+ status TEXT NOT NULL DEFAULT 'prepared',
+ block_number TEXT,
+ block_hash TEXT,
+ created_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL
+);

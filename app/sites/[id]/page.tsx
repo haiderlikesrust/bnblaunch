@@ -5,6 +5,7 @@ import { publishedWebsite } from '@/lib/websites';
 import { db } from '@/lib/server';
 import {env} from 'cloudflare:workers';
 import './site.css';
+import SiteKnowledge from '@/components/site-knowledge';
 
 export const dynamic='force-dynamic';
 type Props={params:Promise<{id:string}>};
@@ -27,6 +28,8 @@ export default async function HostedSite({params}:Props){
   <div className="as-strip"><span>BNB CHAIN</span><span>{t('智能体独立运行','AGENT OPERATED')}</span><span>{t('公开活动记录','PUBLIC ACTIVITY')}</span><a href={'https://bscscan.com/token/'+address} target="_blank" rel="noreferrer">{address.slice(0,8)}…{address.slice(-6)}<ExternalLink size={13}/></a></div>
   <section className="as-about" id="about"><div><span className="as-kicker">01 / {t('我们的故事','OUR STORY')}</span><h2>{t('从一个想法，开始。','Every idea starts somewhere.')}</h2></div><p>{site.about}</p></section>
   {site.sections.length>0&&<section className="as-sections">{site.sections.map((section,i)=><article key={i}><span className="as-kicker">{String(i+1).padStart(2,'0')} / {coin.symbol}</span><h2>{section.heading}</h2><p>{section.body}</p></article>)}</section>}
+  {((site.pages?.length??0)>0||site.tools?.includes("knowledge-search"))&&<SiteKnowledge site={site} base={`${origin}/sites/${encodeURIComponent(id)}`} zh={zh}/>}
+  <section className="as-feedback"><h3>{t("帮助改进网站","Help improve this website")}</h3><p>{t("在 SHEN 上提供反馈，帮助智能体了解哪些内容需要改进。","Tell the agent which content needs more clarity or detail.")}</p><a href={`${origin}/sites/${encodeURIComponent(id)}/feedback`}>{t("提供反馈","Give feedback")}</a></section>
   {artwork.results.length>0&&<section className="as-gallery"><div className="as-section-heading"><span className="as-kicker">{t('原创视觉','VISUAL JOURNAL')}</span><h2>{t('智能体的创作。','A visual point of view.')}</h2></div><div>{artwork.results.map(a=><figure key={a.id}><img src={`${origin}/api/coins/${encodeURIComponent(id)}/publications/${encodeURIComponent(a.id)}/image`} alt={a.alt_text} loading="lazy"/><figcaption>{a.alt_text}</figcaption></figure>)}</div></section>}
   {events.results.length>0&&<section className="as-activity"><div><span className="as-kicker">{t('公开记录','OPEN RECORD')}</span><h2>{t('每一步，都有迹可循。','Follow what happens next.')}</h2><a className="as-read" href={tokenUrl}>{t('查看智能体活动','View agent activity')}<ArrowUpRight size={16}/></a></div><ol>{events.results.map(event=><li key={event.id}><time dateTime={event.created_at}>{new Date(event.created_at).toISOString().slice(0,10)}</time><p>{event.message}</p></li>)}</ol></section>}
   {site.faq.length>0&&<section className="as-faq" id="questions"><div><span className="as-kicker">{t('常见问题','A LITTLE MORE CONTEXT')}</span><h2>{t('值得了解。','Good to know.')}</h2></div><div>{site.faq.map((item,i)=><details key={i}><summary>{item.question}<span>+</span></summary><p>{item.answer}</p></details>)}</div></section>}

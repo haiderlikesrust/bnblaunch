@@ -6,6 +6,7 @@ import { Check, Bot, Search, Globe2, ImageIcon, Radio, LoaderCircle, Info, Clapp
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import TokenImageInput, { type TokenImage } from "./token-image-input";
+import QuoteTokenPicker from "./quote-token-picker";
 import TokenCard from "./token-card";
 import ModelLogo from "./model-logo";
 import AgentSetup from "./agent-setup";
@@ -17,7 +18,7 @@ import { creatorFields, creatorInput, identityStepInput, agentStepInput } from "
 import { PLATFORM_POLICY } from "@/lib/platform-policy";
 import { influencerInput } from "@/lib/influencer-options";
 import { coinTweetUrl } from "@/lib/coin-tweet";
-import { readyWallet, prepareLaunch, sendLaunch, launchStatus, forgetLaunch, type LaunchStage, type LaunchPlan } from "@/lib/launch-flow";
+import { readyWallet, prepareLaunch, sendLaunch, fundAgentGas, launchStatus, forgetLaunch, type LaunchStage, type LaunchPlan } from "@/lib/launch-flow";
 import { confirmLaunch } from "@/lib/launch-confirmation";
 import { logoPalette } from "@/lib/logo-palette";
 
@@ -44,7 +45,7 @@ export default function CreateLaunch({lang,t}:{lang:Language;t:T}){
   logoPalette(`data:${tokenImage.mime};base64,${tokenImage.base64}`).then(palette=>{if(alive)setForm(f=>f.influencer&&JSON.stringify(f.influencer.palette)!==JSON.stringify(palette)?{...f,influencer:{...f.influencer,palette}}:f)}).catch(()=>{});
   return()=>{alive=false};
  },[tokenImage,influencerOn,influencerStyle]);
- const input=()=>({name:form.name,symbol:form.symbol,description:form.description,language:form.language,social:form.social,research:form.research,website:form.website,images:form.images,purpose:form.purpose,modelId:form.modelId,personality:form.personality,focus:form.focus,influencer:form.influencer??null});
+ const input=()=>({name:form.name,symbol:form.symbol,description:form.description,language:form.language,quoteToken:form.quoteToken??"0x0000000000000000000000000000000000000000",social:form.social,research:form.research,website:form.website,images:form.images,purpose:form.purpose,modelId:form.modelId,personality:form.personality,focus:form.focus,influencer:form.influencer??null});
  const issues=(e:z.ZodError)=>e.issues.map(i=>i.message).join(" ");
  const label=(s:LaunchStage)=>({wallet:t("连接并登录钱包","Connect and sign in"),create:t("创建代币","Create the coin"),authorize:t("签署发行授权","Sign the launch authorization"),metadata:t("上传标志与元数据","Pin logo and metadata"),validate:t("验证发行交易","Validate the transaction"),send:t("在钱包中确认发行","Approve the launch in your wallet"),confirm:t("BNB 链确认","Confirm on BNB Chain")})[s];
  // Stays busy while navigating, so a second click cannot start another coin.
@@ -56,7 +57,7 @@ export default function CreateLaunch({lang,t}:{lang:Language;t:T}){
   try{
    const value=creatorInput.parse(input()),tweet=coinTweetUrl.safeParse(tweetUrl);
    if(!tweet.success)throw Error(tweet.error.issues[0].message);
-   if(!/^(0|[1-9]\d*)(\.\d{1,18})?$/.test(buy))throw Error(t("请输入有效的开发者购买数量（BNB）。","Enter a valid developer buy in BNB."));
+   if(!/^(0|[1-9]\d*)(\.\d{1,18})?$/.test(buy))throw Error(t("请输入有效的开发者购买数量（BNB）。","Enter a valid developer buy in the selected pair token."));
    if(!tokenImage)throw Error(t("请上传代币图片。","Add a token image."));
    const account=await readyWallet();
    // An unfinished attempt with identical inputs is resumed, never duplicated.
@@ -81,7 +82,8 @@ export default function CreateLaunch({lang,t}:{lang:Language;t:T}){
     hash=await sendLaunch(coinId,prepared);planId=prepared.planId;
    }
    setSent(coinId);setStage("confirm");
-   await confirmLaunch({coinId,planId,hash,signal:abort.signal,onPending:setNote});
+   const launchedCoin=await confirmLaunch({coinId,planId,hash,signal:abort.signal,onPending:setNote});
+   if(launchedCoin.quoteToken&&launchedCoin.quoteToken!=="0x0000000000000000000000000000000000000000"){setNote("Token launched. Approve the separate BNB deposit to fund agent gas.");await fundAgentGas(coinId);}
    finish(coinId);
   }catch(e){
    if(abort.signal.aborted)return;
@@ -105,11 +107,11 @@ export default function CreateLaunch({lang,t}:{lang:Language;t:T}){
   {step===2&&<><div className="agent-language"><Bot/><span>{t("智能体语言","Agent language")}</span><strong>{form.language==="zh"?"中文":"English"}</strong></div><AgentSetup personality={form.personality??""} focus={form.focus??""} onCharacter={value=>setForm({...form,...value})} purpose={form.purpose??""} modelId={form.modelId??DEFAULT_AGENT_MODEL} onPurpose={purpose=>setForm({...form,purpose})} onModel={modelId=>setForm({...form,modelId})} t={t}/>{[["research",Search,"网络研究","Web research","通过 Brave 获取公开信息。","Research public sources with Brave."],["social",Radio,"社区更新","Community updates","为已连接的 X 账号准备更新。","Prepare updates for a connected X account."],["images",ImageIcon,"图像创作","Image generation","为你的代币创作原创配图。","Create original visuals for your coin."],["website",Globe2,"社区网站","Community website","自动创建、托管并更新社区网站。","Create, host and update a community website."]].map(([key,Icon,zh,en,zd,ed])=>{const I=Icon as typeof Bot,locked=key==="social"&&!!form.influencer;return <div className="capability-row" key={String(key)}><I size={20}/><label htmlFor={String(key)}><strong>{t(String(zh),String(en))}</strong><small>{locked?t("AI 网红在 X 发布，因此保持开启。","Kept on because the AI influencer posts on X."):t(String(zd),String(ed))}</small></label><Switch id={String(key)} disabled={locked} checked={form[key as keyof typeof form] as boolean} onCheckedChange={v=>setForm({...form,[String(key)]:v})}/></div>})}</>}
   {step===3&&<InfluencerSetup value={form.influencer??null} onChange={influencer=>setForm({...form,influencer,...(influencer?{social:true}:{})})} reference={reference} onReference={setReference} consent={consent} onConsent={setConsent} coin={{name:form.name,symbol:form.symbol}} t={t}/>}
   {step===4&&<div className="launch-review">
-   <div className="form-grid"><label className="form-field span-two">{t("代币推文链接（可选）","Coin tweet URL (optional)")}<input type="url" value={tweetUrl} placeholder="https://x.com/youraccount/status/…" maxLength={500} disabled={busy} onChange={e=>setTweetUrl(e.target.value)} aria-describedby="coin-tweet-help"/><small id="coin-tweet-help">{t("链接一条 X 公告。它会出现在代币元数据和代币页面中，无需连接 X 账号。","Link an announcement post on X. It appears in your token metadata and on the coin page. No X connection required.")}</small></label><label className="form-field span-two">{t("开发者购买 · BNB（可选）","Developer buy · BNB (optional)")}<input type="text" inputMode="decimal" value={buy} disabled={busy} onChange={e=>setBuy(e.target.value.trim())} aria-describedby="developer-buy-help"/><small id="developer-buy-help">{t("保持 0 则不购买。你支付此金额与网络燃料费，购买的代币进入你的钱包。","Leave at 0 to launch without buying. You pay this amount plus network gas; purchased tokens go to your wallet.")}</small></label></div>
+   <div className="form-grid"><QuoteTokenPicker value={form.quoteToken??"0x0000000000000000000000000000000000000000"} onChange={quoteToken=>setForm(f=>({...f,quoteToken}))} disabled={busy}/><label className="form-field span-two">{t("代币推文链接（可选）","Coin tweet URL (optional)")}<input type="url" value={tweetUrl} placeholder="https://x.com/youraccount/status/…" maxLength={500} disabled={busy} onChange={e=>setTweetUrl(e.target.value)} aria-describedby="coin-tweet-help"/><small id="coin-tweet-help">{t("链接一条 X 公告。它会出现在代币元数据和代币页面中，无需连接 X 账号。","Link an announcement post on X. It appears in your token metadata and on the coin page. No X connection required.")}</small></label><label className="form-field span-two">{t("开发者购买 · BNB（可选）","Developer buy · selected pair token (optional)")}<input type="text" inputMode="decimal" value={buy} disabled={busy} onChange={e=>setBuy(e.target.value.trim())} aria-describedby="developer-buy-help"/><small id="developer-buy-help">{t("保持 0 则不购买。你支付此金额与网络燃料费，购买的代币进入你的钱包。","Leave at 0 to launch without buying. You pay this amount plus network gas; purchased tokens go to your wallet.")}</small></label></div>
    <div className="agent-economics"><span className="overline">AGENT-MANAGED ECONOMY</span><h3>{t("85% 驱动智能体，15% 回购 SHEN。","85% for the agent. 15% for SHEN.")}</h3><p>{t("已确认可分配费用的 15% 由平台自动留作 SHEN 回购与销毁。其余 85% 用于智能体，先支付计算、X、搜索、托管与 AI 网红等服务成本，再由智能体规划社区支出。","The platform reserves 15% of distributable fees for automated SHEN buybacks and burns. The remaining 85% funds the agent: compute, X, research, hosting and the AI influencer come first, then the agent plans community spending.")}</p><div><span>{t("交易税","Trading tax")}</span><strong>{PLATFORM_POLICY.taxRate}% · {t("365 天","365 days")}</strong></div><div><span>{t("AI 网红","AI influencer")}</span><strong>{form.influencer?t("已启用 · 连接 X 后开始","On · starts once X is connected"):t("未启用","Off")}</strong></div></div>
    <div className="subtle-note"><ShieldCheck size={17}/><span>{t("你将在钱包中签署两次：一次发行授权，一次发行交易（支付网络燃料费）。智能体获得自己的钱包，收取费用并自动签署交易。发行后，开发者控制权永久锁定。","Your wallet asks twice: once to authorize the launch and once to send the launch transaction (you pay network gas). The agent gets its own wallet, collects its fees and signs its own transactions. After launch, developer controls are permanently locked.")}</span></div>
    {stage&&<ol className="launch-progress" aria-live="polite">{STAGES.map((s,i)=>{const state=i<current?"done":i===current?(busy?"active":"failed"):"todo";return <li key={s} className={state}>{state==="done"?<Check size={14}/>:state==="active"?<LoaderCircle className="spin" size={14}/>:<span className="launch-progress-dot"/>}{label(s)}</li>})}</ol>}
-   {plan&&<p className="body-copy launch-plan-summary">{t("预计代币地址","Expected token")}: {plan.predictedAddress}<br/>{t("智能体钱包","Agent wallet")}: {plan.treasury}<br/>{t("开发者购买","Developer buy")}: {plan.initialBuyBnb} BNB + {t("约","~")}{Number(plan.estimatedGasBnb).toFixed(5)} BNB {t("燃料费","gas")}</p>}
+   {plan&&<p className="body-copy launch-plan-summary">{t("预计代币地址","Expected token")}: {plan.predictedAddress}<br/>{t("智能体钱包","Agent wallet")}: {plan.treasury}<br/>{t("开发者购买","Developer buy")}: {plan.initialBuyBnb} {plan.quoteSymbol??"BNB"} + {t("约","~")}{Number(plan.estimatedGasBnb).toFixed(5)} BNB {t("燃料费","gas")}</p>}
    {note&&busy&&<p className="body-copy" role="status">{note}</p>}
   </div>}
   {error&&<div className="form-error" role="alert">{error}{sent&&<> <a className="text-link" href={"/token/"+sent}>{t("打开代币页面","Open the coin page")}<ExternalLink size={13}/></a></>}</div>}

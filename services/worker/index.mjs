@@ -8,7 +8,7 @@ const app=new URL(env.SHEN_APP_URL),signer=new URL(env.SIGNER_INTERNAL_URL??'htt
 if((app.protocol!=='https:'&&!(app.protocol==='http:'&&app.hostname==='web'&&app.port==='3000'))||app.username||app.password) throw Error('Only the private web service may use HTTP');
 if(signer.protocol!=='https:'&&!(signer.protocol==='http:'&&signer.hostname==='signer')) throw Error('Only the private signer service may use HTTP');
 let stopping=false,lastSuccess=0,stage='starting',tickStarted=0;
-let influencerPass=null,contentPass=null;
+let influencerPass=null,contentPass=null,codingPass=null,conversionPass=null;
 async function request(base,path,token,data,site=false){
   return serviceRequest(base,path,token,data,site?env.SHEN_SITE_ACCESS_TOKEN:undefined);
 }
@@ -18,6 +18,7 @@ async function cycle(){
   stage='signer_authority';
   const authority=await request(signer,'/v1/status',env.SIGNER_WORKER_TOKEN);
   if(!authority.signingReady||!authority.workerAuthorized||authority.chainId!==56)throw Error('Worker signing authority unavailable');
+  if(!conversionPass)conversionPass=request(signer,'/v1/conversions/tick',env.SIGNER_WORKER_TOKEN,{}).catch(error=>console.warn(`Quote conversion pending [${failureCode(error)}].`)).finally(()=>{conversionPass=null;});
   try{await request(signer,'/v1/protocol/tick',env.SIGNER_WORKER_TOKEN,{});}catch(error){console.warn(`Protocol fee processing pending [${failureCode(error)}].`);}
   stage='operation_queue';
   const {operations,domainFunding=[]}=await site();
@@ -47,6 +48,7 @@ async function cycle(){
   // At most one pass of each optional service runs alongside planning.
   // Slow media must not add minutes to every agent's work cycle.
   if(!influencerPass)influencerPass=site({action:'influencer'}).catch(error=>console.warn(`Influencer media check failed [${failureCode(error)}].`)).finally(()=>{influencerPass=null;});
+  if(!codingPass)codingPass=site({action:'coding'}).catch(error=>console.warn('Coding pass unavailable.')).finally(()=>{codingPass=null;});
   if(!contentPass)contentPass=site({action:'content'}).catch(error=>console.warn(`Community publishing check failed [${failureCode(error)}].`)).finally(()=>{contentPass=null;});
   stage='agent_tick';tickStarted=Date.now();const tick=await site({action:'tick'});lastSuccess=Date.now();
   if(tick?.rejection)console.warn(`Agent plan rejected [${tick.rejection.code}]: ${tick.rejection.message}`);
@@ -55,4 +57,4 @@ const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000||(
 health.listen(Number(env.PORT??8081),'0.0.0.0');
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{stopping=true;health.close();});
 while(!stopping){try{await cycle();}catch(error){console.warn(`Agent worker failed [${stage}/${failureCode(error)}]. No success has been recorded.`);}if(!stopping)await delay(15000);}
-await Promise.allSettled([influencerPass,contentPass].filter(Boolean));
+await Promise.allSettled([influencerPass,contentPass,codingPass,conversionPass].filter(Boolean));

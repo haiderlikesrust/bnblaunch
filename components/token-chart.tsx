@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
 import type { Candle } from "@/lib/market";
 import type { T } from "@/lib/ui";
-type Data={candles:Candle[];source:string;currency?:"BNB"|"USD";indexing?:boolean;updatedAt:number;stale?:boolean;error?:string};
+type Data={candles:Candle[];source:string;currency?:string;indexing?:boolean;updatedAt:number;stale?:boolean;error?:string};
 export default function TokenChart({coinId,t,compact=false}:{coinId:string;t:T;compact?:boolean}){
  const [data,setData]=useState<Data>(),[error,setError]=useState("");
  useEffect(()=>{let active=true;const load=async()=>{try{const r=await fetch("/api/coins/"+coinId+"/chart");const d=await r.json() as Data;if(!r.ok)throw Error(d.error||"Market data unavailable");if(active){setData(d);setError("")}}catch(e){if(active)setError((e as Error).message)}};void load();const timer=setInterval(load,120000);return()=>{active=false;clearInterval(timer)}},[coinId]);
