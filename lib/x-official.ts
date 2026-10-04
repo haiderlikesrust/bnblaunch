@@ -4,8 +4,24 @@ import { XConnectionError } from './x-connection-result.ts';
 
 export const X_SCOPES = ['tweet.read', 'tweet.write', 'users.read', 'media.write', 'offline.access'];
 export type XTokens = { accessToken: string; refreshToken: string; expiresAt: number; scopes: string[] };
-export class XHttpFailure extends ProviderFailure { readonly status:number;constructor(status:number){super(true,null,status);this.status=status;} }
+type XProblem='client-forbidden'|'usage-capped'|'not-authorized-for-resource'|null;
+export class XHttpFailure extends ProviderFailure { readonly status:number;readonly retryAt:number|null;readonly problem:XProblem;constructor(status:number,retryAt:number|null=null,problem:XProblem=null){super(true,null,status);this.status=status;this.retryAt=retryAt;this.problem=problem;} }
 export class XAccessRevoked extends XHttpFailure { constructor() { super(401);this.uncertain=false; } }
+function retryTime(headers:Headers){
+ const now=Date.now(),after=headers.get('retry-after'),reset=Number(headers.get('x-rate-limit-reset'))*1000;
+ const wait=after===null?NaN:/^\d+(\.\d+)?$/.test(after)?now+Number(after)*1000:Date.parse(after);
+ const times=[wait,reset].filter(n=>Number.isFinite(n)&&n>now);
+ return times.length?Math.max(...times):now+60000;
+}
+async function problemType(response:Response):Promise<XProblem>{
+ // Return only recognized enums. Provider detail text can contain account IDs
+ // or credentials and must never appear in errors, redirects or logs.
+ const body=await response.json().catch(()=>null) as {type?:unknown;errors?:{type?:unknown}[]}|null;
+ const type=body?.type??(Array.isArray(body?.errors)?body.errors[0]?.type:null);
+ for(const problem of ['client-forbidden','usage-capped','not-authorized-for-resource'] as const)
+  if(type==='https://api.x.com/2/problems/'+problem||type==='https://api.twitter.com/2/problems/'+problem)return problem;
+ return null;
+}
 // Only a user token's 401 means the owner revoked access; a 401 on the app's
 // bearer token is a platform credential problem and never disconnects a coin.
 export async function xRequest(token: string, path: string, init: RequestInit = {}, transport: typeof fetch = fetch, allowEmpty = false, userToken = true) {
@@ -13,7 +29,7 @@ export async function xRequest(token: string, path: string, init: RequestInit = 
   try { response = await transport('https://api.x.com' + path, { ...init, headers: { ...init.headers, Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(45000) }); }
   catch { throw new ProviderFailure(); }
   if (response.status === 401 && userToken) throw new XAccessRevoked();
-  if (!response.ok) throw new XHttpFailure(response.status);
+  if (!response.ok) throw new XHttpFailure(response.status,response.status===429?retryTime(response.headers):null,await problemType(response));
   try { return await response.json(); } catch { if (allowEmpty) return {}; throw new ProviderFailure(); }
 }
 export type XMediaProcessing = { state: 'succeeded' | 'processing' | 'failed'; checkAfterMs: number };
@@ -23,6 +39,28 @@ function mediaProcessing(info?: { state?: string; check_after_secs?: number }): 
   return { state: info.state === 'failed' ? 'failed' : 'processing', checkAfterMs: wait };
 }
 const VIDEO_CHUNK_BYTES = 4000000;
+type BalanceRead={expiresAt:number;pending?:Promise<number>;value?:number;error?:unknown};
+// All coins in this server process use the same app balance. Coalesce concurrent
+// reads and short-lived results; never substitute stale credit for a failed read.
+const balances=new WeakMap<typeof fetch,Map<string,BalanceRead>>();
+async function appBalance(token:string,transport:typeof fetch):Promise<number>{
+ if(!token)throw new ProviderFailure(false,0);
+ let cache=balances.get(transport);if(!cache){cache=new Map();balances.set(transport,cache)}
+ const saved=cache.get(token);
+ if(saved?.pending)return saved.pending;
+ if(saved&&saved.expiresAt>Date.now()){if(saved.error)throw saved.error;return saved.value!}
+ if(cache.size>=16&&!cache.has(token))cache.delete(cache.keys().next().value!);
+ const entry:BalanceRead={expiresAt:0};cache.set(token,entry);
+ entry.pending=(async()=>{
+  try{
+   const value=await xRequest(token,'/2/usage/credits',{},transport,false,false) as {data?:{total_balance?:number}},balance=value.data?.total_balance;
+   if(typeof balance!=='number'||!Number.isFinite(balance)||balance<0||!Number.isSafeInteger(Math.floor(balance*1e6)))throw new ProviderFailure();
+   entry.value=Math.floor(balance*1e6);entry.expiresAt=Date.now()+60000;return entry.value;
+  }catch(error){entry.error=error;entry.expiresAt=error instanceof XHttpFailure&&error.status===429?Math.max(Date.now()+1000,error.retryAt??Date.now()+60000):Date.now()+10000;throw error}
+  finally{entry.pending=undefined}
+ })();
+ return entry.pending;
+}
 export async function exchangeXToken(clientId: string, clientSecret: string, params: Record<string, string>, transport: typeof fetch = fetch): Promise<XTokens> {
   let response: Response;
   try {
@@ -47,10 +85,7 @@ export async function exchangeXToken(clientId: string, clientSecret: string, par
 export function xProvider(billingToken: string, transport: typeof fetch = fetch) {
   return {
     async balance() {
-      if (!billingToken) throw new ProviderFailure(false, 0);
-      const value = await xRequest(billingToken, '/2/usage/credits', {}, transport, false, false) as {data?:{total_balance?:number}}, balance = value.data?.total_balance;
-      if (typeof balance !== 'number' || !Number.isFinite(balance) || balance < 0 || !Number.isSafeInteger(Math.floor(balance * 1e6))) throw new ProviderFailure();
-      return Math.floor(balance * 1e6);
+      return appBalance(billingToken,transport);
     },
     async me(accessToken: string) {
       const value = await xRequest(accessToken, '/2/users/me', {}, transport) as {data?:{id:string;username:string}}, user = value.data;

@@ -77,31 +77,20 @@ test('prelaunch connection still requires wallet ownership, origin, selected soc
  }finally{f.close()}
 });
 
-for(const [status,message] of [[401,/application Bearer Token/],[403,/billing permissions/],[402,/insufficient API credit/],[429,/rate-limited/],[500,/Could not verify/]])test(`connection start explains X credit HTTP ${status} without leaking provider output`,async()=>{
+test('OAuth redirect is independent of billing endpoint failures and makes no provider calls',async()=>{
  const f=fixture();try{
-  globalThis.fetch=async()=>Response.json({error:'private-provider-detail'},{status});
-  await assert.rejects(beginXConnection('coin','owner'),e=>e.status===503&&message.test(e.message)&&!e.message.includes('private-provider-detail'));
-  assert.equal(f.sql.prepare('SELECT COUNT(*) AS count FROM x_oauth_attempts').get().count,0);
+  let calls=0;globalThis.fetch=async()=>{calls++;throw Error('billing endpoint unavailable')};
+  const start=await beginXConnection('coin','owner');assert.equal(new URL(start.url).hostname,'x.com');
+  assert.equal(calls,0);assert.equal(f.sql.prepare('SELECT COUNT(*) AS count FROM x_oauth_attempts').get().count,1);
  }finally{f.close()}
 });
-test('connection start distinguishes storage failure from unavailable credit',async()=>{
+
+test('connection start reports storage failures without leaking database details',async()=>{
  const f=fixture();try{
   env.DB={prepare(){throw Error('private-database-value')}};
   await assert.rejects(beginXConnection('coin','owner'),e=>e.status===503&&e.message.includes('database migrations')&&!e.message.includes('private-database-value'));
  }finally{f.close()}
 });
-test('unreachable or malformed X balance cannot start OAuth; zero balance has a funding message',async()=>{
- const f=fixture();try{
-  for(const fetchBalance of [async()=>{throw Error('private-network-detail')},async()=>Response.json({data:{total_balance:'unknown'}})]){
-   globalThis.fetch=fetchBalance;
-   await assert.rejects(beginXConnection('coin','owner'),e=>e.status===503&&e.message.startsWith('Could not verify')&&!e.message.includes('private-'));
-  }
-  globalThis.fetch=async()=>Response.json({data:{total_balance:0}});
-  await assert.rejects(beginXConnection('coin','owner'),/credit needs replenishing/);
-  assert.equal(f.sql.prepare('SELECT COUNT(*) AS count FROM x_oauth_attempts').get().count,0);
- }finally{f.close()}
-});
-
 for(const [stage,status,providerError,expected] of [
  ['token',401,'invalid_client','oauth_client'],['token',400,'invalid_grant','expired'],
  ['profile',403,'Forbidden','profile_access'],['profile',402,'CreditsDepleted','credits'],['profile',429,'TooManyRequests','rate_limited'],
@@ -118,6 +107,17 @@ for(const [stage,status,providerError,expected] of [
   assert.equal((await xAccount('coin')),null);
   assert.equal(f.sql.prepare('SELECT status FROM x_oauth_attempts').get().status,'failed');
   assert.equal(JSON.stringify([...result.headers]).includes('private-'),false);
+ }finally{f.close()}
+});
+
+for(const [problem,code] of [['client-forbidden','profile_app_access'],['usage-capped','usage_capped'],['not-authorized-for-resource','profile_permissions'],['unknown-private-value','profile_access']])test(`profile error distinguishes ${problem} without exposing provider details`,async()=>{
+ const f=fixture();try{
+  const start=await beginXConnection('coin','owner');await callbackSession(f,start.state);
+  const previous=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>url.endsWith('/users/me')?Response.json({type:'https://api.x.com/2/problems/'+problem,detail:'private-provider-token'},{status:403}):previous(url,init);
+  const result=await callback(callbackRequest(start.state));
+  assert.equal(result.headers.get('location'),'https://shen.now/token/coin?x=failed&x_error='+code);
+  assert.equal(await xAccount('coin'),null);assert.equal(JSON.stringify([...result.headers]).includes('private-'),false);
  }finally{f.close()}
 });
 

@@ -10,7 +10,7 @@ export function xCallbackUrl(){if(!env.APP_ORIGIN)throw new AppError(503,'Set th
 const randomToken=()=>Array.from(crypto.getRandomValues(new Uint8Array(32))).map(v=>v.toString(16).padStart(2,'0')).join('');
 export async function socialStatus(coinId:string){const account=await xAccount(coinId);return {configured:xConfigured(),connected:xConnected(account),username:account?.username??null,reconnectRequired:!!account&&(!xConnected(account)||(account.refresh_status==='refreshing'&&Date.now()-account.updated_at>120000))};}
 export async function beginXConnection(coinId:string,owner:string){
- let stage:'configuration'|'encryption'|'credit-check'|'storage'='configuration';
+ let stage:'configuration'|'encryption'|'storage'='configuration';
  try{
  if(!xConfigured())throw new AppError(503,'X account setup is not available yet.');
  const redirectUri=xCallbackUrl(),now=Date.now(),state=randomToken(),id=await digest(state),verifier=randomToken();
@@ -21,12 +21,11 @@ export async function beginXConnection(coinId:string,owner:string){
  const limit=Number(env.X_LOGIN_DAILY_LIMIT_MICROUSD??1000000),cost=10000;
  if(!Number.isSafeInteger(limit)||limit<cost)throw new AppError(503,'X connection allowance is unavailable.');
  stage='storage';
- // Allowances are checked before any paid X call, so spam cannot exhaust the
+ // Connecting uses local OAuth state, not the app billing-balance endpoint.
+ // Allowances still bound callback/profile requests, so spam cannot exhaust the
  // platform's X credit or rate limit for everyone else.
  const recent=await db().prepare("SELECT (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?) AS hour,(SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?) AS day,(SELECT COUNT(*) FROM x_oauth_attempts WHERE created_at>?) AS total").bind(owner,now-3600000,owner,now-86400000,now-86400000).first<{hour:number;day:number;total:number}>();
  if(Number(recent?.hour)>=3||Number(recent?.day)>=10||Number(recent?.total)*cost+cost>limit)throw new AppError(429,'The X connection allowance has been reached. Try later.');
- stage='credit-check';
- if(await xProvider(env.X_API_BEARER_TOKEN!).balance()<cost)throw new AppError(503,'X API credit needs replenishing.');
  stage='storage';
  await db().prepare("UPDATE x_oauth_attempts SET encrypted_verifier='',status='expired' WHERE expires_at<? AND status IN ('pending','exchanging')").bind(now).run();
  const saved=await db().prepare("INSERT INTO x_oauth_attempts(id,coin_id,owner,encrypted_verifier,status,created_at,expires_at) SELECT ?,?,?,?,'pending',?,? WHERE (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?)<3 AND (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?)<10 AND (SELECT COUNT(*) FROM x_oauth_attempts WHERE created_at>?)*?+?<=?").bind(id,coinId,owner,encrypted,now,now+600000,owner,now-3600000,owner,now-86400000,now-86400000,cost,cost,limit).run();
@@ -38,13 +37,6 @@ export async function beginXConnection(coinId:string,owner:string){
   const status=error instanceof XHttpFailure?error.status:null;
   // Log only stage/status, never credentials, OAuth state, or database values.
   console.warn('[SHEN X connection start]',stage,status??'failed');
-  if(stage==='credit-check'){
-   if(status===401)throw new AppError(503,'X rejected the application Bearer Token. Check X_API_BEARER_TOKEN in the web service; use the app Bearer Token, not the OAuth Client Secret.');
-   if(status===403)throw new AppError(503,'X denied access to the app credit balance. Check the X app’s API access and billing permissions.');
-   if(status===402)throw new AppError(503,'X reported insufficient API credit. Replenish the X developer account.');
-   if(status===429)throw new AppError(503,'X rate-limited the credit check. Wait a few minutes before connecting again.');
-   throw new AppError(503,'Could not verify the X API credit balance. Check X_API_BEARER_TOKEN and X API availability, then retry.');
-  }
   if(stage==='storage')throw new AppError(503,'SHEN could not save the X connection attempt. Check the web service’s database migrations and connection.');
   if(stage==='encryption')throw new AppError(503,'SHEN could not encrypt the X connection. Check SERVICE_CREDENTIALS_KEY in the web service.');
   throw new AppError(503,'X connection settings are invalid. Check APP_ORIGIN and the X OAuth credentials in the web service.');
@@ -77,7 +69,15 @@ export async function finishXConnection(state:string,cookie:string|undefined,own
  }catch(error){
   await db().prepare("UPDATE x_oauth_attempts SET status='failed' WHERE id=?").bind(id).run();
   if(error instanceof XConnectionError)throw error;
-  if(stage==='profile')throw new XConnectionError(error instanceof XHttpFailure?error.status===401?'profile_auth':error.status===402?'credits':error.status===403?'profile_access':error.status===429?'rate_limited':'x_unavailable':'x_unavailable');
+  if(stage==='profile'){
+   console.warn('[SHEN X profile]',error instanceof XHttpFailure?error.status:'unavailable',error instanceof XHttpFailure?error.problem??'unspecified':'unspecified');
+   if(error instanceof XHttpFailure){
+    if(error.problem==='client-forbidden')throw new XConnectionError('profile_app_access');
+    if(error.problem==='usage-capped')throw new XConnectionError('usage_capped');
+    if(error.problem==='not-authorized-for-resource')throw new XConnectionError('profile_permissions');
+   }
+   throw new XConnectionError(error instanceof XHttpFailure?error.status===401?'profile_auth':error.status===402?'credits':error.status===403?'profile_access':error.status===429?'rate_limited':'x_unavailable':'x_unavailable');
+  }
   throw new XConnectionError('server_error');
  }
 }
