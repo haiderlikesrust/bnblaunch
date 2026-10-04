@@ -103,3 +103,11 @@ test('routine checks preserve a rejected plan outcome and expose the separate pl
   const approved=await get();assert.equal(approved.state,'scheduled');assert.equal(approved.lastPlan.outcome,'approved');assert.equal(JSON.stringify(approved).includes('private'),false);
  }finally{sql.close();}
 });
+
+
+test('research follows approved next topics or mission context rather than a token-name collision',async()=>{
+ const {researchQuery}=await import('../lib/research-preview.ts');
+ assert.equal(researchQuery({name:'MARTIAN',symbol:'MARTIAN',purpose:'Explore Mars science'}),'Explore Mars science');
+ assert.equal(researchQuery({name:'MARTIAN',symbol:'MARTIAN',focus:'Atmosphere',purpose:'Mars',nextResearchQuery:'Latest rover findings'}),'Latest rover findings');
+ assert.equal(researchQuery({name:'A',symbol:'A',nextResearchQuery:'x'.repeat(500)}).length,240);
+});

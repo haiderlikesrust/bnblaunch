@@ -177,6 +177,8 @@ export async function runAgentTick(capabilities?:string[]){
     }
     let plan;
     try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return await rejectedResult("plan_rejected");}
+    // Funded community work should not be parked for hours after a valid plan.
+    plan={...plan,nextCheckMinutes:Math.min(plan.nextCheckMinutes,5)};
     lastReason="guard_request_failed";
     let guard;
     try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},GUARD_OUTPUT_TOKENS,64000,{coinId:coin.id,runId:run.id,kind:"plan-guard"});}catch(error){
@@ -189,7 +191,7 @@ export async function runAgentTick(capabilities?:string[]){
     await settle(coin.id,run,result.cost+guard.cost+researchCost,JSON.stringify(plan));
     if(!verdict.success||!verdict.data.allow)return await rejectedResult("plan_rejected");
     const current=await db().prepare("SELECT config FROM coins WHERE id=?").bind(coin.id).first<{config:string}>();if(!current)throw new AppError(409,"Coin changed during planning.");
-    const updated={...JSON.parse(current.config),lastPlanRunId:run.id};
+    const updated={...JSON.parse(current.config),lastPlanRunId:run.id,nextResearchQuery:coin.research?plan.nextResearchQuery:null};
     const now=Date.now();
     const saved=await db().batch([
       db().prepare("UPDATE coins SET config=?,updated_at=? WHERE id=? AND config=? AND EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(JSON.stringify(updated),new Date().toISOString(),coin.id,current.config,coin.id,lease.id,now),

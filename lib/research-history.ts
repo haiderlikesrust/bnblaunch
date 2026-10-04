@@ -1,7 +1,7 @@
 import { db } from './server';
-import { researchQuery, researchSources, type ResearchPreview } from './research-preview';
+import { researchQuery, researchSources, type ResearchPreview, type ResearchIdentity } from './research-preview';
 
-export async function recordResearch(coin: { id: string; name: string; symbol: string }, runId: string, search: () => Promise<unknown>) {
+export async function recordResearch(coin: ResearchIdentity & {id:string}, runId: string, search: () => Promise<unknown>) {
   await db().prepare("INSERT INTO research_runs(id,coin_id,query,status,sources,started_at) VALUES(?,?,?,'searching','[]',?)")
     .bind(runId, coin.id, researchQuery(coin), Date.now()).run();
   try {

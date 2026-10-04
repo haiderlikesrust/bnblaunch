@@ -67,3 +67,20 @@ test('stale expiry cannot refund a competing active X post',{timeout:5000},async
   assert.equal(f.counts.posts,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd credit FROM coins').get().credit,985000);assert.equal(f.sql.prepare('SELECT cost_microusd FROM agent_runs').get().cost_microusd,15000);assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'complete');
  }finally{releaseFirst.resolve();releasePost.resolve();await Promise.allSettled([a,b].filter(Boolean));Date.now=realNow;f.close()}
 });
+
+
+test('local community text publishes without X, image services or additional provider charges',async()=>{
+ const f=fixture(),keys=['X_CLIENT_ID','X_CLIENT_SECRET','X_API_BEARER_TOKEN','OPENROUTER_API_KEY','X_READ_COST_MICROUSD'],previous=Object.fromEntries(keys.map(k=>[k,env[k]]));
+ try{
+  for(const key of keys)delete env[key];env.X_READ_COST_MICROUSD='invalid';
+  const coin=f.coin('local');f.sql.prepare('UPDATE coins SET config=? WHERE id=?').run(JSON.stringify({...coin,social:false,images:false}),'local');
+  f.job('text','local','gallery',false);
+  globalThis.fetch=async()=>{throw Error('A local text post must not call a provider')};
+  await runContentTick();await runContentTick();await runContentTick();
+  assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'complete');
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000);
+  assert.equal(f.sql.prepare('SELECT status,cost_microusd FROM agent_runs').get().cost_microusd,0);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,1);
+  assert.deepEqual(f.counts,{generations:0,uploads:0,posts:0});
+ }finally{for(const key of keys){if(previous[key]===undefined)delete env[key];else env[key]=previous[key];}f.close();}
+});

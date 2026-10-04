@@ -1,6 +1,12 @@
 export type ResearchSource = { title: string; url: string; description: string };
 export type ResearchPreview = { id: string; query: string; status: 'searching' | 'complete' | 'unavailable' | 'interrupted'; startedAt: number; finishedAt: number | null; sources: ResearchSource[] };
-export const researchQuery = (coin: { name: string; symbol: string }) => `${coin.name} ${coin.symbol} BNB`;
+export type ResearchIdentity={name:string;symbol:string;focus?:string;purpose?:string;description?:string;nextResearchQuery?:string|null};
+export function researchQuery(coin:ResearchIdentity){
+  // Follow a previous approved plan, otherwise start from the mission rather
+  // than assuming a similarly named search result belongs to this token.
+  const topic=coin.nextResearchQuery||coin.focus||coin.purpose||coin.description;
+  return topic?topic.replace(/[\u0000-\u001f\u007f]/g,' ').replace(/\s+/g,' ').trim().slice(0,240)||`${coin.name} ${coin.symbol} BNB`:`${coin.name} ${coin.symbol} BNB`;
+}
 
 // Search results are untrusted. Render text only and never embed a remote page.
 export function researchSources(value: unknown): ResearchSource[] {

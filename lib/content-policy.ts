@@ -2,7 +2,7 @@ import { z } from 'zod';
 import twitterText from 'twitter-text';
 export const IMAGE_MODEL='bytedance-seed/seedream-4.5';
 export const supportedImageModels=[IMAGE_MODEL,'bytedance-seed/seedream-5-0-flash'];
-export const publicationInput=z.object({destination:z.enum(['x','gallery']),text:z.string().trim().min(1).max(1000),imagePrompt:z.string().trim().min(10).max(1200).nullable(),altText:z.string().trim().max(240)}).strict().superRefine((v,ctx)=>{if(v.destination==='x'&&!twitterText.parseTweet(v.text).valid)ctx.addIssue({code:z.ZodIssueCode.custom,message:'X text exceeds its weighted character limit'});if(v.destination==='gallery'&&!v.imagePrompt)ctx.addIssue({code:z.ZodIssueCode.custom,message:'Gallery entries require an image'});});
+export const publicationInput=z.object({destination:z.enum(['x','gallery']),text:z.string().trim().min(1).max(1000),imagePrompt:z.string().trim().min(10).max(1200).nullable(),altText:z.string().trim().max(240)}).strict().superRefine((v,ctx)=>{if(v.destination==='x'&&!twitterText.parseTweet(v.text).valid)ctx.addIssue({code:z.ZodIssueCode.custom,message:'X text exceeds its weighted character limit'});});
 export type Publication= z.infer<typeof publicationInput>;
 export function validatePublication(value:Publication,capabilities:{social:boolean;images:boolean;connected:boolean}){if(value.destination==='x'&&(!capabilities.social||!capabilities.connected))throw Error('X account is not ready');if(value.imagePrompt&&!capabilities.images)throw Error('Image generation is not enabled');return publicationInput.parse(value);}
 export function normalizedTweet(text:string){return text.normalize('NFC').replace(/\r\n/g,'\n').trim();}

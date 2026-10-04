@@ -32,7 +32,7 @@ async function finish(job:Job,status:'complete'|'failed',cost:number,message:str
 }
 async function reserveJob(job:Job,coin:Coin,publication:Publication){
  const account=await xAccount(job.coin_id);validatePublication(publication,{social:coin.social,images:coin.images,connected:xConnected(account)});
- const quote=publication.imagePrompt?await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL):null,costs=xCosts(publication.text);
+ const quote=publication.imagePrompt?await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL):null,costs=publication.destination==='x'?xCosts(publication.text):{post:0,upload:0,read:0};
  if(publication.destination==='x'&&publication.imagePrompt&&!xMediaConfigured())return false;
  if(publication.destination==='x'&&(!xConfigured()||await xProvider(env.X_API_BEARER_TOKEN!).balance()<costs.post+costs.upload+costs.read*3))return false;
  const ceiling=(quote?.ceiling??0)+(publication.destination==='x'?costs.post+(quote?costs.upload:0)+costs.read*3:0),now=Date.now();
@@ -54,7 +54,7 @@ export async function runContentTick(){
  if(!job)return {processed:false};
  const turn=await db().prepare('UPDATE content_jobs SET next_attempt_at=? WHERE id=? AND next_attempt_at<=?').bind(now+90000,job.id,now).run();if(!turn.meta.changes)return {processed:false};
  const row=await db().prepare('SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL').bind(job.coin_id).first<CoinRow>();if(!row)return {processed:false};
- const coin=JSON.parse(row.config) as Coin,publication=publicationInput.parse(JSON.parse(job.payload)),costs=job.billing?JSON.parse(job.billing) as ReturnType<typeof xCosts>:xCosts(publication.text);
+ const coin=JSON.parse(row.config) as Coin,publication=publicationInput.parse(JSON.parse(job.payload)),costs=publication.destination==='gallery'?{post:0,upload:0,read:0}:job.billing?JSON.parse(job.billing) as ReturnType<typeof xCosts>:xCosts(publication.text);
  let activeXAccount:XAccount|null=null;
  try{
   if(Date.now()-job.created_at>21600000&&['queued','reserved','image_ready','media_ready'].includes(job.status)){await finish(job,'failed',job.cost_microusd,'A community update expired before publication.');return {processed:true};}
@@ -85,8 +85,8 @@ export async function runContentTick(){
    ]);return {processed:true};
   }
   if(publication.destination==='gallery'){
-   if(!['image_ready','media_ready'].includes(job.status))return {processed:false};
-   await finish(job,'complete',job.cost_microusd,'Created community artwork.');return {processed:true};
+   if(!['image_ready','media_ready'].includes(job.status)&&!(job.status==='reserved'&&!publication.imagePrompt))return {processed:false};
+   await finish(job,'complete',job.cost_microusd,publication.imagePrompt?'Created community artwork.':'Published a community update.');return {processed:true};
   }
   const account=await xAccount(job.coin_id);if(!account||account.user_id!==job.user_id)throw new ProviderFailure();activeXAccount=account;const session=await xSession(account),provider=xProvider(env.X_API_BEARER_TOKEN!);
   if(await provider.balance()<costs.post+(job.status==='image_ready'?costs.upload:0)+costs.read*3)return {processed:false};

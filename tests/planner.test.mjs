@@ -149,7 +149,7 @@ test('wallet checks run within one minute without repeating a paid plan',async()
   await runAgentTick(['autonomous-planning']);
   const schedule=f.sql.prepare('SELECT next_run_at,next_plan_at FROM runtime_leases').get();
   assert.ok(schedule.next_run_at-Date.now()<=60000&&schedule.next_run_at>Date.now());
-  assert.ok(schedule.next_plan_at-Date.now()>3500000);
+  assert.ok(schedule.next_plan_at-Date.now()>4*60000&&schedule.next_plan_at-Date.now()<=5*60000);
   const calls=f.calls.length;
   f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();
   assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');
@@ -263,5 +263,40 @@ test('deployment wakes an old rejected plan without resetting approved or unsett
   f.sql.prepare("UPDATE agent_runs SET status='settled'").run();
   f.sql.prepare("INSERT INTO agent_memories VALUES('retry','coin','approved','',?)").run(Date.now());
   f.sql.exec(migration);assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,123);
+ }finally{f.close();}
+});
+
+
+test('approved community work queues local text and schedules a mission follow-up within five minutes',async()=>{
+ const f=fixture();try{
+  f.output({...plan,nextCheckMinutes:240,website:null,nextResearchQuery:'Mars atmosphere recent research findings',publication:{destination:'gallery',text:'Our mission is to explore Mars through research and original work.',imagePrompt:null,altText:''}});
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
+  const key=env.BRAVE_API_KEY,cost=env.BRAVE_COST_MICROUSD;env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';
+  try{assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');}finally{if(key===undefined)delete env.BRAVE_API_KEY;else env.BRAVE_API_KEY=key;if(cost===undefined)delete env.BRAVE_COST_MICROUSD;else env.BRAVE_COST_MICROUSD=cost;}
+  const job=f.sql.prepare('SELECT payload,status FROM content_jobs').get();assert.equal(job.status,'queued');assert.equal(JSON.parse(job.payload).destination,'gallery');
+  const config=JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config);assert.equal(config.nextResearchQuery,'Mars atmosphere recent research findings');
+  const schedule=f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get();assert.ok(schedule.next_plan_at<=Date.now()+5*60000);
+  assert.equal(JSON.parse(f.calls[1].messages[1].content).plan.nextCheckMinutes,5);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+ }finally{f.close();}
+});
+
+test('unapproved follow-up research never replaces the saved query',async()=>{
+ const f=fixture();try{
+  f.output({...plan,nextResearchQuery:'unapproved topic'});f.reject();await runAgentTick(['autonomous-planning']);
+  assert.equal(JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config).nextResearchQuery,undefined);
+ }finally{f.close();}
+});
+
+test('community deployment wakes long approved waits but preserves reserved work',()=>{
+ const f=fixture();try{
+  f.sql.prepare('INSERT INTO runtime_leases(coin_id,lease_until,next_run_at,next_plan_at) VALUES(?,0,?,?)').run('coin',Date.now()+60000,Date.now()+4*3600000);
+  f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('approved','coin','plan','settled',100,?)").run(new Date().toISOString());
+  const migration=readFileSync('drizzle/0027_continue_community_work.sql','utf8');
+  f.sql.exec(migration);assert.ok(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at>Date.now());
+  f.sql.prepare("INSERT INTO agent_memories VALUES('approved','coin','summary','',?)").run(Date.now());
+  f.sql.exec(migration);assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,0);
+  f.sql.prepare('UPDATE runtime_leases SET next_plan_at=?').run(Date.now()+4*3600000);
+  f.sql.prepare("UPDATE agent_runs SET status='reserved'").run();f.sql.exec(migration);assert.ok(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at>Date.now());
  }finally{f.close();}
 });
