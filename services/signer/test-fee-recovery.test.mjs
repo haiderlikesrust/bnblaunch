@@ -70,3 +70,39 @@ test('expired wallet fence prevents recording or broadcasting a recovery signatu
   f.store.account=account;await f.run(true);assert.equal(f.sent.length,1,'unsigned attempt can be requoted safely');
  }finally{f.store.close();}
 });
+
+test('revised recovery allows 0.25 BNB total and deducts a confirmed older recovery',async()=>{
+ const f=fixture();try{
+  f.setBalance(1000000000000000000n);await f.run(true);f.confirm();await f.run(true);
+  const revised={...f.authority,id:randomUUID(),maximumWei:'250000000000000000',previousRecoveryIds:[f.authority.id]};
+  const quote=await recoverTestFees(f.store,f.engine,revised);
+  assert.equal(quote.previouslyRecoveredBnb,'0.03');assert.equal(quote.maximumTotalBnb,'0.25');assert.equal(quote.amountBnb,'0.22');
+  assert.equal(f.sent.length,1,'preview sends nothing');
+ }finally{f.store.close()}
+});
+
+test('revised recovery reconciles an ambiguous older transfer before authorizing anything else',async()=>{
+ const f=fixture();try{
+  await f.run(true);
+  const revised={...f.authority,id:randomUUID(),maximumWei:'250000000000000000',previousRecoveryIds:[f.authority.id]};
+  const preview=await recoverTestFees(f.store,f.engine,revised);assert.equal(preview.previousPayment,true);assert.equal(f.sent.length,1);
+  const resumed=await recoverTestFees(f.store,f.engine,revised,{execute:true});assert.equal(resumed.previousPayment,true);
+  assert.equal(f.sent.length,2);assert.equal(f.sent[0],f.sent[1]);assert.equal(f.store.intent(revised.id),undefined);
+ }finally{f.store.close()}
+});
+
+test('revised recovery supersedes only unsigned old authority and remains idempotent',async()=>{
+ const f=fixture();try{
+  f.setBalance(1000000000000000000n);
+  const saved={coinId:f.authority.coinId,kind:'test_recovery',recipient:f.authority.recipient,maximumWei:f.authority.maximumWei,amountWei:'1'};
+  f.store.db.prepare("INSERT INTO intents(id,coin_id,request,kind,amount_wei,expires_at,status,created_at) VALUES(?,?,?,'test_recovery','1',?,'created',?)").run(f.authority.id,f.authority.coinId,JSON.stringify(saved),Date.now()+60000,Date.now());
+  const revised={...f.authority,id:randomUUID(),maximumWei:'250000000000000000',previousRecoveryIds:[f.authority.id]};
+  assert.equal((await recoverTestFees(f.store,f.engine,revised)).amountBnb,'0.25');assert.equal(f.store.intent(f.authority.id).status,'created','preview leaves journal unchanged');
+  const first=await recoverTestFees(f.store,f.engine,revised,{execute:true});
+  assert.equal(first.amountBnb,'0.25');assert.equal(f.store.intent(f.authority.id).status,'expired');assert.equal(parseTransaction(f.sent[0]).value,250000000000000000n);
+  await assert.rejects(f.run(true),/manual reconciliation/);
+  await recoverTestFees(f.store,f.engine,revised,{execute:true});assert.equal(f.sent[0],f.sent[1]);
+  f.confirm();assert.equal((await recoverTestFees(f.store,f.engine,revised,{execute:true})).status,'confirmed');
+  assert.equal(f.sent.length,2);
+ }finally{f.store.close()}
+});

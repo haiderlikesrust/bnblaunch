@@ -10,7 +10,9 @@ The local signer command is fixed to:
 - Token: `0x2e027e343b6359c792B6a061888Bee4362C57777`
 - Source: `0x92b3291953bad11b24debccd6e40c8eb6b1b964f`
 - Authorized recipient: `0x4a41ee912283966be446514af39e1e3322bb7840`
-- Maximum transfer: 0.03 BNB; actual amount is the lesser of this and confirmed
+- Revised maximum recovery: 0.25 BNB total, including any confirmed payment from
+  the earlier 0.03 BNB authorization. The user confirmed this increase on 2026-10-04.
+  The new transfer is the lesser of the remaining authorized total and confirmed
   balance minus verified unpaid SHEN fees, the configured operating gas reserve,
   and this transfer's gas allowance.
 
@@ -36,6 +38,13 @@ command again to reconcile confirmation or rebroadcast the identical saved bytes
 Once confirmed, subsequent runs report the same transfer and cannot withdraw
 newly accumulated fees. A reverted transfer is terminal and is not automatically
 replaced. Do not delete or edit its journal row or change the fixed recovery ID.
+
+The revised command retains the earlier recovery ID as a predecessor. If the
+earlier transfer is signed or pending, it reports/resumes that transfer first;
+run the same command again after confirmation to recover any remaining allowance.
+Confirmed earlier amounts are subtracted from 0.25 BNB. An unsigned older attempt
+is superseded only during execution; preview does not change it. Both journals
+are retained, and retries of the revised command never create another payment.
 
 Existing signed payments, active treasury campaigns, domain funding, untracked
 pending nonces, or unverified fee reserves stop recovery. Live wallet locks and

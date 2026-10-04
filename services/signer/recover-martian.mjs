@@ -9,12 +9,13 @@ import { recoverTestFees, RecoveryError } from './test-fee-recovery.mjs';
 
 // One recovery authorized by the operator in this chat. Not a withdrawal API.
 const authority=Object.freeze({
- id:'e4fbc49e-894d-4b82-ae31-a41c617882d0',
+ id:'98a43dcc-bdab-4d21-b60c-4fa595c799ba',
+ previousRecoveryIds:['e4fbc49e-894d-4b82-ae31-a41c617882d0'],
  coinId:'0acdcac1-1a5f-4e97-b31e-9eea2a3eaabd',
  address:'0x92b3291953bad11b24debccd6e40c8eb6b1b964f',
  token:'0x2e027e343b6359c792B6a061888Bee4362C57777',
  recipient:'0x4a41ee912283966be446514af39e1e3322bb7840',
- maximumWei:'30000000000000000',
+ maximumWei:'250000000000000000',
 });
 let store;
 try{
