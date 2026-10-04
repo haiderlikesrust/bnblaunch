@@ -41,6 +41,31 @@ async function callbackSession(f,state){
 }
 const callbackRequest=state=>new Request('https://shen.now/api/social/x/callback?state='+state+'&code=private-authorization-code');
 
+for(const [status,message] of [[401,/application Bearer Token/],[403,/billing permissions/],[402,/insufficient API credit/],[429,/rate-limited/],[500,/Could not verify/]])test(`connection start explains X credit HTTP ${status} without leaking provider output`,async()=>{
+ const f=fixture();try{
+  globalThis.fetch=async()=>Response.json({error:'private-provider-detail'},{status});
+  await assert.rejects(beginXConnection('coin','owner'),e=>e.status===503&&message.test(e.message)&&!e.message.includes('private-provider-detail'));
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS count FROM x_oauth_attempts').get().count,0);
+ }finally{f.close()}
+});
+test('connection start distinguishes storage failure from unavailable credit',async()=>{
+ const f=fixture();try{
+  env.DB={prepare(){throw Error('private-database-value')}};
+  await assert.rejects(beginXConnection('coin','owner'),e=>e.status===503&&e.message.includes('database migrations')&&!e.message.includes('private-database-value'));
+ }finally{f.close()}
+});
+test('unreachable or malformed X balance cannot start OAuth; zero balance has a funding message',async()=>{
+ const f=fixture();try{
+  for(const fetchBalance of [async()=>{throw Error('private-network-detail')},async()=>Response.json({data:{total_balance:'unknown'}})]){
+   globalThis.fetch=fetchBalance;
+   await assert.rejects(beginXConnection('coin','owner'),e=>e.status===503&&e.message.startsWith('Could not verify')&&!e.message.includes('private-'));
+  }
+  globalThis.fetch=async()=>Response.json({data:{total_balance:0}});
+  await assert.rejects(beginXConnection('coin','owner'),/credit needs replenishing/);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS count FROM x_oauth_attempts').get().count,0);
+ }finally{f.close()}
+});
+
 for(const [stage,status,providerError,expected] of [
  ['token',401,'invalid_client','oauth_client'],['token',400,'invalid_grant','expired'],
  ['profile',403,'Forbidden','profile_access'],['profile',402,'CreditsDepleted','credits'],['profile',429,'TooManyRequests','rate_limited'],

@@ -191,3 +191,5 @@ OAuth failures return to the browser-bound, wallet-owned coin page with a fixed 
 
 
 Token launch readiness checks the dedicated signing service and BNB Chain, independently of agent activation. Missing worker heartbeats, provider credit or optional X/research/image capabilities do not block token creation. Wallet ownership, authorization, metadata validation, contract preflight and receipt verification still apply. The worker continues enforcing provider availability, credit reservations and treasury funding before acting. X can be connected before or after launch for coins with community updates enabled.
+
+If Connect X fails before leaving the coin page, the start handler now identifies failures in credit verification, credential encryption or database storage. An X credit-check HTTP 401 means check X_API_BEARER_TOKEN (the app Bearer Token, not Client Secret); 403 means X denied balance access; 402 or a zero balance means replenish X developer credit; 429 means wait for the rate limit. The web log records only the stage and HTTP status, without tokens or provider bodies. OAuth Client ID/Secret errors after authorization remain separate callback diagnostics.

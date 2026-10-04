@@ -10,19 +10,40 @@ export function xCallbackUrl(){if(!env.APP_ORIGIN)throw new AppError(503,'Set th
 const randomToken=()=>Array.from(crypto.getRandomValues(new Uint8Array(32))).map(v=>v.toString(16).padStart(2,'0')).join('');
 export async function socialStatus(coinId:string){const account=await xAccount(coinId);return {configured:xConfigured(),connected:xConnected(account),username:account?.username??null,reconnectRequired:!!account&&(!xConnected(account)||(account.refresh_status==='refreshing'&&Date.now()-account.updated_at>120000))};}
 export async function beginXConnection(coinId:string,owner:string){
+ let stage:'configuration'|'encryption'|'credit-check'|'storage'='configuration';
+ try{
  if(!xConfigured())throw new AppError(503,'X account setup is not available yet.');
  const redirectUri=xCallbackUrl(),now=Date.now(),state=randomToken(),id=await digest(state),verifier=randomToken();
  const challengeBytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)));
  const challenge=btoa(String.fromCharCode(...challengeBytes)).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+ stage='encryption';
  const encrypted=await sealServiceSecret(env.SERVICE_CREDENTIALS_KEY,'x-oauth:'+id+':'+owner,{verifier});
  const limit=Number(env.X_LOGIN_DAILY_LIMIT_MICROUSD??1000000),cost=10000;
  if(!Number.isSafeInteger(limit)||limit<cost)throw new AppError(503,'X connection allowance is unavailable.');
+ stage='credit-check';
  if(await xProvider(env.X_API_BEARER_TOKEN!).balance()<cost)throw new AppError(503,'X API credit needs replenishing.');
+ stage='storage';
  await db().prepare("UPDATE x_oauth_attempts SET encrypted_verifier='',status='expired' WHERE expires_at<? AND status IN ('pending','exchanging')").bind(now).run();
  const saved=await db().prepare("INSERT INTO x_oauth_attempts(id,coin_id,owner,encrypted_verifier,status,created_at,expires_at) SELECT ?,?,?,?,'pending',?,? WHERE (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?)<3 AND (SELECT COUNT(*) FROM x_oauth_attempts WHERE created_at>?)*?+?<=?").bind(id,coinId,owner,encrypted,now,now+600000,owner,now-3600000,now-86400000,cost,cost,limit).run();
  if(!saved.meta.changes)throw new AppError(429,'The X connection allowance has been reached. Try later.');
  const params=new URLSearchParams({response_type:'code',client_id:env.X_CLIENT_ID!,redirect_uri:redirectUri,scope:X_SCOPES.join(' '),state,code_challenge:challenge,code_challenge_method:'S256'});
  return {state,url:'https://x.com/i/oauth2/authorize?'+params};
+ }catch(error){
+  if(error instanceof AppError)throw error;
+  const status=error instanceof XHttpFailure?error.status:null;
+  // Log only stage/status, never credentials, OAuth state, or database values.
+  console.warn('[SHEN X connection start]',stage,status??'failed');
+  if(stage==='credit-check'){
+   if(status===401)throw new AppError(503,'X rejected the application Bearer Token. Check X_API_BEARER_TOKEN in the web service; use the app Bearer Token, not the OAuth Client Secret.');
+   if(status===403)throw new AppError(503,'X denied access to the app credit balance. Check the X app’s API access and billing permissions.');
+   if(status===402)throw new AppError(503,'X reported insufficient API credit. Replenish the X developer account.');
+   if(status===429)throw new AppError(503,'X rate-limited the credit check. Wait a few minutes before connecting again.');
+   throw new AppError(503,'Could not verify the X API credit balance. Check X_API_BEARER_TOKEN and X API availability, then retry.');
+  }
+  if(stage==='storage')throw new AppError(503,'SHEN could not save the X connection attempt. Check the web service’s database migrations and connection.');
+  if(stage==='encryption')throw new AppError(503,'SHEN could not encrypt the X connection. Check SERVICE_CREDENTIALS_KEY in the web service.');
+  throw new AppError(503,'X connection settings are invalid. Check APP_ORIGIN and the X OAuth credentials in the web service.');
+ }
 }
 export async function finishXConnection(state:string,cookie:string|undefined,owner:string,code:string|null,denied=false){
  if(!/^[a-f0-9]{64}$/.test(state)||cookie!==state)throw new XConnectionError('browser_mismatch');
