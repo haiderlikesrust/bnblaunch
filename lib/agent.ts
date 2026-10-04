@@ -1,12 +1,14 @@
 import { AppError, persist, type CoinRow } from "./server";
 import { confirmedBalance } from "./providers";
 import { agentReadiness } from "./signer";
+import { hasPrepaidServices } from "./funding";
 import type { Coin } from "./model";
 
 export async function inspectAgent(coin:Coin,row:CoinRow){
   if(!coin.tokenAddress||!coin.treasuryAddress)return {ready:false,reason:"launch_confirmation_required",balance:0};
   const balance=await confirmedBalance(coin.treasuryAddress),runtime=await agentReadiness(coin);
-  const reason=!runtime.ready?"agent_services_unavailable":balance.bnb<coin.threshold?"below_activation_threshold":row.ai_credit_microusd<=0?"service_funding_pending":"ready";
+  const funded=balance.bnb>=coin.threshold||await hasPrepaidServices(coin.id,row.ai_credit_microusd);
+  const reason=!runtime.ready?"agent_services_unavailable":!funded?"below_activation_threshold":row.ai_credit_microusd<=0?"service_funding_pending":"ready";
   return {ready:reason==="ready",reason,balance:balance.bnb,confirmedBlock:balance.block};
 }
 export async function generateSite(coin:Coin,_row:CoinRow):Promise<never>{

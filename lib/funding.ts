@@ -14,6 +14,10 @@ export async function bnbPrice(blockNumber?:bigint){
   return {answer:round[1],block:block.number,roundId:round[0],updatedAt:round[3]};
 }
 export function usdMicros(wei:bigint,answer:bigint){return wei*answer/100000000000000000000n;}
+export async function hasPrepaidServices(coinId:string,creditMicrousd:number){
+  if(!Number.isSafeInteger(creditMicrousd)||creditMicrousd<=0)return false;
+  return !!await db().prepare("SELECT settlement_id FROM compute_funding WHERE coin_id=? AND amount_microusd>0 LIMIT 1").bind(coinId).first();
+}
 export async function computeCapacity(){
   if(!env.OPENROUTER_MANAGEMENT_KEY)throw new AppError(412,"Compute funding reconciliation is not configured.");
   const result=await remoteJson<{data:{total_credits:number;total_usage:number}}>("https://openrouter.ai/api/v1/credits",{headers:{Authorization:"Bearer "+env.OPENROUTER_MANAGEMENT_KEY}});

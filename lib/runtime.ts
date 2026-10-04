@@ -9,7 +9,7 @@ import { agentModel, GUARDRAIL_MODEL } from "./agent-models";
 import { chatPrice, callCeiling, chatCompletion, PaidCompletionRejected } from "./chat-completion";
 import { AppError, db, type CoinRow } from "./server";
 import { signerRequest } from "./signer";
-import { bnbPrice, computeCapacity } from "./funding";
+import { bnbPrice, computeCapacity, hasPrepaidServices } from "./funding";
 import { chainClient, research } from "./providers";
 import { agentPlan, PLANNER_RULES, PLAN_GUARD_RULES, validatePlanFunds } from "./runtime-policy";
 import type { Coin } from "./model";
@@ -86,7 +86,10 @@ export async function runAgentTick(capabilities?:string[]){
     const coin=JSON.parse(row.config) as Coin;
     const wallet=await signerRequest<{address:string;tokenAddress:string;balanceWei:string;protocolReserveWei?:string|null;feeAccountingReady?:boolean;feeAccountingIssue?:string;observedAt:number;block:string}>(`/v1/wallets/${coin.id}/balance`);
     if(wallet.address.toLowerCase()!==row.treasury_address||wallet.tokenAddress?.toLowerCase()!==row.token_address)throw new AppError(503,"Agent wallet binding mismatch.");
-    const wei=BigInt(wallet.balanceWei),balance=Number(formatEther(wei)),active=wei>=parseEther(String(coin.threshold));
+    const wei=BigInt(wallet.balanceWei),balance=Number(formatEther(wei)),treasuryFunded=wei>=parseEther(String(coin.threshold));
+    // A confirmed service payment converts treasury BNB into usable credit.
+    // Do not require that same BNB to remain in the wallet to use the credit.
+    const active=treasuryFunded||await hasPrepaidServices(coin.id,row.ai_credit_microusd);
     const nextCoin={...coin,balance,treasuryObservedAt:wallet.observedAt,state:active?"active":"dormant"} as Coin;
     await db().prepare("UPDATE coins SET config=?,updated_at=? WHERE id=? AND config=?").bind(JSON.stringify(nextCoin),new Date().toISOString(),coin.id,row.config).run();
     if(wallet.feeAccountingReady===false||typeof wallet.protocolReserveWei!=="string"||!/^\d+$/.test(wallet.protocolReserveWei))return tickResult(["historical_rpc_required","rpc_log_limit","fee_audit_pending"].includes(wallet.feeAccountingIssue??"")?wallet.feeAccountingIssue!:"fee_verification_failed");
@@ -112,6 +115,9 @@ export async function runAgentTick(capabilities?:string[]){
     const protocolReserve=BigInt(wallet.protocolReserveWei);
     const minimumGas=BigInt(signerPolicy.gasReserveWei),gasReserve=wei/100n>minimumGas?wei/100n:minimumGas,available=wei>gasReserve+protocolReserve?wei-gasReserve-protocolReserve:0n;
     if(row.ai_credit_microusd<ceiling+contentAllowance){
+      // Below the activation threshold, use already-paid credit only. New
+      // payments still require the treasury threshold and all reserve checks.
+      if(!treasuryFunded)return tickResult("awaiting_service_funding");
       lastReason="funding_price_unavailable";
       const price=await bnbPrice();
       lastReason="service_capacity_unavailable";

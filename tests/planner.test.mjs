@@ -203,3 +203,30 @@ test('a failed planner records its failure stage and keeps ambiguous credit rese
   assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');
  }finally{f.close();}
 });
+
+
+test('confirmed prepaid services remain usable after the deposit lowers BNB below activation',async()=>{
+ const f=fixture();try{
+  f.wallet({balanceWei:'6632000000000000',protocolReserveWei:'2494919121834000',feeAccountingReady:true});
+  f.sql.prepare('UPDATE coins SET config=?,ai_credit_microusd=?').run(JSON.stringify({...f.coin,threshold:.01}),7800000);
+  f.sql.prepare('INSERT INTO compute_funding(settlement_id,coin_id,amount_microusd,settled_at) VALUES(?,?,?,?)').run('confirmed-payment','coin',7800000,Date.now());
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  assert.equal(f.calls.length,2);
+  const snapshot=JSON.parse(f.calls[0].messages[1].content);
+  assert.equal(snapshot.availableWei,'2137080878166000');assert.equal(snapshot.gasReserveWei,'2000000000000000');
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+  assert.equal(JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config).state,'active');
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,7799800);
+ }finally{f.close();}
+});
+
+for(const mode of ['unverified','empty','insufficient','fee_audit'])test('prepaid exception keeps funding safeguards: '+mode,async()=>{
+ const f=fixture();try{
+  f.wallet({balanceWei:'6632000000000000',protocolReserveWei:mode==='fee_audit'?null:'2494919121834000',feeAccountingReady:mode!=='fee_audit',feeAccountingIssue:'rpc_log_limit'});
+  f.sql.prepare('UPDATE coins SET config=?,ai_credit_microusd=?').run(JSON.stringify({...f.coin,threshold:.01}),mode==='empty'?0:mode==='insufficient'?1:7800000);
+  if(mode!=='unverified')f.sql.prepare('INSERT INTO compute_funding(settlement_id,coin_id,amount_microusd,settled_at) VALUES(?,?,?,?)').run('confirmed-payment','coin',7800000,Date.now());
+  const expected=mode==='fee_audit'?'rpc_log_limit':mode==='insufficient'?'awaiting_service_funding':'awaiting_treasury_funding';
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,expected);assert.equal(f.calls.length,0);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+ }finally{f.close();}
+});
