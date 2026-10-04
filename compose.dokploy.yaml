@@ -134,6 +134,9 @@ services:
     build:
       context: .
       target: browser
+    # Bump when the external seccomp profile changes so Compose recreates it.
+    labels:
+      io.shen.seccomp-revision: "2"
     restart: unless-stopped
     init: true
     read_only: true
