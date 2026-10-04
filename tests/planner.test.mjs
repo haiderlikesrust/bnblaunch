@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 register('./planner-loader.mjs',import.meta.url);
 const env=globalThis.__shenTestEnv={OPENROUTER_API_KEY:'test',OPENROUTER_MANAGEMENT_KEY:'test',SIGNER_URL:'https://signer.test',SIGNER_WEB_TOKEN:'test-only-'.repeat(6)};
 const {runAgentTick,runtimeCapabilities}=await import('../lib/runtime.ts');
+const {recoverInterruptedPlans}=await import('../lib/plan-recovery.ts');
 const {publishedWebsite}=await import('../lib/websites.ts');
 const {agentPlan}=await import('../lib/runtime-policy.ts');
 const {boundedPlanningContext,contextBytes}=await import('../lib/planning-context.ts');
@@ -156,14 +157,15 @@ test('large Chinese history fits the byte budget without dropping the mission or
  const snapshot={mission:'使命'.repeat(700),treasuryWei:'1000000000000000000',sources:Array.from({length:3},()=>({description:'研究'.repeat(500)})),community:{recent:Array.from({length:5},()=>({text:'内容'.repeat(1200)}))},website:{about:'故事'.repeat(1800)},spending:{market:{marketCapUsd:100000,lastCandles:Array.from({length:12},()=>({time:Date.now(),open:1,high:2,low:.5,close:1.5}))}}};
  const result=boundedPlanningContext('Follow the mission.',snapshot);assert.ok(contextBytes('Follow the mission.',result)<=31000);assert.equal(result.mission,snapshot.mission);assert.equal(result.treasuryWei,snapshot.treasuryWei);assert.equal(result.spending.market.marketCapUsd,100000);assert.equal(result.contextTruncated,true);assert.equal(snapshot.community.recent.length,5);
 });
-test('the real funded planner and website revision transaction execute against PostgreSQL',async()=>{
+test('interrupted-plan recovery, funded planning and website revision execute against PostgreSQL',async()=>{
  const f=fixture(),pg=new PGlite();await pg.waitReady;
  try{
   await migratePostgres({query:(sql,params)=>params?pg.query(sql,params):pg.exec(sql).then(r=>r[0]??{rows:[]})},resolve('drizzle'));
   await pg.query('INSERT INTO coins(id,owner,config,token_address,treasury_address,created_at,updated_at,ai_credit_microusd) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',['coin','owner',JSON.stringify(f.coin),token,wallet,new Date().toISOString(),new Date().toISOString(),1000000]);
+  await pg.query("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('interrupted','coin','plan','reserved',50000,$1)",[new Date(Date.now()-35*60000).toISOString()]);
   // One PGlite connection; serialize pool checkout just like a real pool client.
   let tail=Promise.resolve();env.DB=createDatabase({async connect(){const prior=tail;let release;tail=new Promise(r=>{release=r});await prior;return {async query(sql,params){const result=await pg.query(sql,params);return {...result,rowCount:result.affectedRows??result.rows.length}},release}}});
-  const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');assert.equal(Number((await publishedWebsite('coin')).site.revision),1);assert.equal((await pg.query('SELECT status FROM agent_runs')).rows[0].status,'settled');
+  const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');assert.equal(Number((await publishedWebsite('coin')).site.revision),1);assert.equal((await pg.query("SELECT status FROM agent_runs WHERE id='interrupted'")).rows[0].status,'settled');assert.equal(Number((await pg.query("SELECT reserved_microusd FROM agent_runs WHERE id='interrupted:unverified'")).rows[0].reserved_microusd),50000);
  }finally{await pg.close();f.close()}
 });
 
@@ -588,5 +590,35 @@ test('provider payment errors retain funded credit without making another servic
   for(let i=0;i<3;i++){f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');}
   assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,6000000);
   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+ }finally{f.close()}
+});
+
+test('a worker restart recovers an old unfinished plan without refunding its unknown cost',async()=>{
+ const f=fixture();try{
+  f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('interrupted','coin','plan','reserved',50000,?)").run(new Date(Date.now()-35*60000).toISOString());
+  f.sql.prepare('UPDATE coins SET ai_credit_microusd=950000').run();
+  f.sql.prepare('INSERT INTO runtime_leases(coin_id,lease_until,next_run_at,next_plan_at) VALUES(?,0,0,?)').run('coin',Date.now()+3600000);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  const prior=f.sql.prepare("SELECT status,output FROM agent_runs WHERE id='interrupted'").get();
+  assert.equal(prior.status,'settled');assert.equal(JSON.parse(prior.output).rejection.code,'interrupted');
+  assert.equal(f.sql.prepare("SELECT reserved_microusd FROM agent_runs WHERE id='interrupted:unverified'").get().reserved_microusd,50000);
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,949800);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM agent_memories WHERE id='interrupted'").get().n,0,'interrupted plans authorize no actions');
+  f.due();await runAgentTick(['autonomous-planning']);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE kind='provider_hold'").get().n,1);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM events WHERE id='interrupted:recovered'").get().n,1);
+ }finally{f.close()}
+});
+
+test('recovery leaves a recent unfinished plan and a live previous worker alone',async()=>{
+ const f=fixture();try{
+  f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('recent','coin','plan','reserved',50000,?)").run(new Date().toISOString());
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');
+  assert.equal(f.sql.prepare("SELECT status FROM agent_runs WHERE id='recent'").get().status,'reserved');
+  f.sql.prepare("UPDATE agent_runs SET created_at=?").run(new Date(Date.now()-35*60000).toISOString());
+  f.sql.prepare("UPDATE runtime_leases SET lease_id='live',lease_until=?,next_run_at=0").run(Date.now()+60000);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'no_due_agents');
+  assert.equal(await recoverInterruptedPlans({coinId:'coin',id:'wrong-fence'}),0);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE kind='provider_hold'").get().n,0);
  }finally{f.close()}
 });

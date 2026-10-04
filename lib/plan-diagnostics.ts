@@ -3,6 +3,7 @@ import { z } from 'zod';
 // Public diagnostics contain schema-owned names and fixed descriptions only.
 // Never publish model output, Zod's received values, or a guard's free text.
 const messages={
+  interrupted:'The planning attempt was interrupted. Its unverified cost remains reserved separately; a new attempt can use the remaining credit.',
   schema:'The plan did not match the required format.',
   invalid_json:'The planner did not return valid JSON.',
   planner_output:'The planner returned an incomplete or unsupported response.',

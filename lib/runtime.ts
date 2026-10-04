@@ -5,6 +5,7 @@ import { codeContext, codeRate, codeStatements, validateCodeProposal } from "./c
 import { activityCadence } from './activity-cadence';
 import { agentMemory, memoryStatement } from "./agent-memory";
 import { isolatedProviderHold, providerHoldStatement } from './provider-holds';
+import { PLANNING_LEASE_MS, recoverInterruptedPlans } from './plan-recovery';
 import { xCosts } from "./social-config";
 import { recordResearch, researchHistory } from "./research-history";
 import { browserReady, browseResearch } from './browser-research';
@@ -63,7 +64,7 @@ async function acquire():Promise<Lease|null>{
   const now=Date.now();
   await db().prepare("INSERT INTO runtime_leases(coin_id,lease_until,next_run_at) SELECT id,0,0 FROM coins WHERE token_address IS NOT NULL ON CONFLICT(coin_id) DO NOTHING").run();
   const candidate=await db().prepare("SELECT coin_id FROM runtime_leases WHERE lease_until<? AND next_run_at<=? ORDER BY next_run_at,coin_id LIMIT 1").bind(now,now).first<{coin_id:string}>();if(!candidate)return null;
-  const id=crypto.randomUUID();const r=await db().prepare("UPDATE runtime_leases SET lease_id=?,lease_until=? WHERE coin_id=? AND lease_until<? AND next_run_at<=?").bind(id,now+480000,candidate.coin_id,now,now).run();return r.meta.changes?{coinId:candidate.coin_id,id}:null;
+  const id=crypto.randomUUID();const r=await db().prepare("UPDATE runtime_leases SET lease_id=?,lease_until=? WHERE coin_id=? AND lease_until<? AND next_run_at<=?").bind(id,now+PLANNING_LEASE_MS,candidate.coin_id,now,now).run();return r.meta.changes?{coinId:candidate.coin_id,id}:null;
 }
 async function reserve(lease:Lease,ceiling:number){
   const id=crypto.randomUUID(),now=new Date().toISOString();
@@ -113,6 +114,7 @@ export async function runAgentTick(capabilities?:string[]){
     return {...tickResult(reason),rejection};
   };
   try{
+    await recoverInterruptedPlans(lease);
     const row=await db().prepare("SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL").bind(lease.coinId).first<CoinRow>();if(!row)return {processed:false,reason:"coin_unavailable"};
     const coin=JSON.parse(row.config) as Coin & {lastPlanRunId?:string;workObservedAt?:number;nextResearchQuery?:string|null;treasuryThesis?:unknown};
     const wallet=await signerRequest<{address:string;tokenAddress:string;balanceWei:string;protocolReserveWei?:string|null;feeAccountingReady?:boolean;feeAccountingIssue?:string;quoteToken?:string|null;convertedFeesWei?:string|null;observedAt:number;block:string}>(`/v1/wallets/${coin.id}/balance`);
