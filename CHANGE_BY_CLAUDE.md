@@ -163,3 +163,6 @@ Removed the legacy one-per-hour/eight-per-day publication quota. Publication tim
 Identity and Agent step validation now inspect only their respective fields in the shared form; fields from later steps no longer produce “Unrecognized keys” on Continue. Final creation/API validation remains strict. Regression tests cover the reported Identity input, unfinished mission fields, Agent progression and final rejection of unknown/platform fields.
 
 Follow-up validation: 340 automated tests, TypeScript, and the Dokploy production build passed. Live paid image generation and the deployed browser were not exercised.
+
+### Higgsfield single-key authentication
+The current official quick start accepts the complete API key as copied. Added `HIGGSFIELD_API_KEY` to the server, Compose and env templates; it takes precedence over legacy ID/secret settings and is sent unchanged after the Key authorization scheme. Existing split credentials remain compatible. Tests cover single-key headers, precedence, malformed-key rejection and legacy behavior.

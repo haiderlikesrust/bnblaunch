@@ -18,6 +18,9 @@ export class HiggsfieldRejected extends Error{readonly status:number;constructor
 export class HiggsfieldPending extends Error{readonly status:number|null;constructor(status:number|null=null){super('Higgsfield result is pending.');this.status=status;}}
 
 export function higgsfieldCredentials(){
+ // The API console supplies one complete credential; preserve it as copied.
+ const key=env.HIGGSFIELD_API_KEY?.trim();
+ if(key)return /^[\x21-\x7e]{8,1024}$/.test(key)?key:null;
  const id=env.HIGGSFIELD_API_KEY_ID?.trim(),secret=env.HIGGSFIELD_API_KEY_SECRET?.trim();
  return id&&secret&&/^[^\s:]{4,200}$/.test(id)&&/^\S{8,400}$/.test(secret)?id+':'+secret:null;
 }
