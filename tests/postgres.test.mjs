@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
 import { createDatabase, migratePostgres, postgresSql } from '../server/postgres.mjs';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 test('SQL conversion preserves literal question marks and public field names',()=>{
   assert.equal(postgresSql("SELECT '?' AS literal, created_at AS createdAt FROM coins WHERE id=?"),"SELECT '?' AS literal, created_at AS \"createdAt\" FROM coins WHERE id=$1");
@@ -19,6 +20,8 @@ test('all migrations and transactional reservations run on PostgreSQL',async()=>
     await migratePostgres(migrationClient,resolve('drizzle'));await migratePostgres(migrationClient,resolve('drizzle'));
     const db=createDatabase({connect:async()=>client});
     await db.prepare("INSERT INTO coins(id,owner,config,created_at,updated_at,ai_credit_microusd) VALUES(?,?,?,?,?,?)").bind('coin','owner',JSON.stringify({name:'Test',state:'active'}),'2026-10-03','2026-10-03',100).run();
+    await pg.exec(postgresSql(readFileSync('drizzle/0023_testing_activation_threshold.sql','utf8')));
+    assert.deepEqual(JSON.parse((await db.prepare("SELECT config FROM coins WHERE id='coin'").first()).config),{name:'Test',state:'active',threshold:0.01});
     const reserve=async(id)=>db.batch([
       db.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) SELECT ?,id,'plan','reserved',70,'2026-10-03' FROM coins WHERE id='coin' AND ai_credit_microusd>=70").bind(id),
       db.prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd-70 WHERE id='coin' AND EXISTS(SELECT 1 FROM agent_runs WHERE id=?)").bind(id),

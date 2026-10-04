@@ -12,6 +12,7 @@ export function postgresSql(sql){
     out+=ch==='?'&&!quoted?'$'+(++parameter):ch;
   }
   return out.replace(/`([^`]+)`/g,'"$1"')
+    .replace(/json_set\((\w+),\s*'\$\.(\w+)',\s*(\d+(?:\.\d+)?)\)/g,"jsonb_set($1::jsonb, '{$2}', '$3'::jsonb)::text")
     .replace(/json_extract\((\w+(?:\.\w+)?),\s*'\$\.(\w+)'\)/g,"($1::jsonb ->> '$2')")
     .replace(/unixepoch\(\)\*1000/g,'(floor(extract(epoch from clock_timestamp())*1000)::bigint)')
     .replace(/\b[Aa][Ss]\s+([a-z][a-zA-Z]*[A-Z][a-zA-Z]*)\b/g,'AS "$1"');
