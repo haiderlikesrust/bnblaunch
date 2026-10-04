@@ -8,6 +8,7 @@ import { DomainFunding } from './domain-funding.mjs';
 import { WalletStore, authenticate } from './store.mjs';
 import { Campaigns } from './campaigns.mjs';
 import { SigningEngine } from './engine.mjs';
+import { ProtocolFees } from './protocol-fees.mjs';
 
 process.umask(0o077);
 const env=process.env;
@@ -26,10 +27,15 @@ const store=new WalletStore(storePath,required('SIGNER_MASTER_KEY'));
 const client=createPublicClient({chain:bsc,transport:http(rpc,{timeout:12000,retryCount:1})});
 const engine=new SigningEngine(store,client,{settlementAddress,slippageBps,gasReserveWei:positive('SIGNER_GAS_RESERVE_WEI'),maxGasPriceWei:positive('SIGNER_MAX_GAS_PRICE_WEI'),buybacksEnabled:env.SIGNER_BUYBACKS_ENABLED==='true'});
 const campaigns=new Campaigns(store,engine);
+const shenTokenAddress=env.SHEN_TOKEN_ADDRESS?.trim()||null;
+if(shenTokenAddress&&(!isAddress(shenTokenAddress)||shenTokenAddress.toLowerCase()===zeroAddress))throw Error('Invalid SHEN_TOKEN_ADDRESS');
+engine.policy.shenTokenAddress=shenTokenAddress;
+const protocolFees=new ProtocolFees(store,engine,campaigns);
+engine.protocolFees=protocolFees;
 const domainFundingEnabled=env.DOMAIN_AUTO_FUNDING_ENABLED==='true';
 if(domainFundingEnabled&&(!env.BASE_RPC_URL||new URL(env.BASE_RPC_URL).protocol!=='https:'||!env.PORKBUN_API_KEY||!env.PORKBUN_SECRET_KEY))throw Error('Domain funding requires HTTPS Base RPC and Porkbun credentials');
 const baseClient=createPublicClient({chain:base,transport:http(env.BASE_RPC_URL??'https://mainnet.base.org',{timeout:12000,retryCount:1})});
-const domainFunding=new DomainFunding(store,{bnbClient:client,baseClient,getOrderId,verifyLaunch:(coinId,hash)=>engine.bindLaunch(coinId,hash)},{enabled:domainFundingEnabled,porkbunApiKey:env.PORKBUN_API_KEY,porkbunSecretKey:env.PORKBUN_SECRET_KEY,relayApiKey:env.RELAY_API_KEY,gasReserveWei:engine.policy.gasReserveWei,maxGasPriceWei:engine.policy.maxGasPriceWei});
+const domainFunding=new DomainFunding(store,{bnbClient:client,baseClient,getOrderId,verifyLaunch:(coinId,hash)=>engine.bindLaunch(coinId,hash),protocolReserve:wallet=>engine.protocolReserve(wallet)},{enabled:domainFundingEnabled,porkbunApiKey:env.PORKBUN_API_KEY,porkbunSecretKey:env.PORKBUN_SECRET_KEY,relayApiKey:env.RELAY_API_KEY,gasReserveWei:engine.policy.gasReserveWei,maxGasPriceWei:engine.policy.maxGasPriceWei});
 function send(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(value));}
 async function body(req){let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>8192) throw Error('Request too large');}return JSON.parse(raw);}
 function exact(value,keys){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k))) throw Error('Unsupported request fields');}
@@ -47,6 +53,13 @@ const server=createServer(async(req,res)=>{
     if(path==='/v1/status'&&req.method==='GET') {
       await engine.chainReady();
       return send(res,200,{chainId:56,signingReady:true,domainFundingEnabled,workerAuthorized:worker,custody:'dedicated-agent-wallets',requiresDeveloperApproval:false,settlementAddress,gasReserveWei:engine.policy.gasReserveWei.toString(),buybacksEnabled:engine.policy.buybacksEnabled});
+    }
+    if(path==='/v1/protocol/tick'&&worker&&req.method==='POST'){exact(await body(req),[]);return send(res,200,await protocolFees.tick());}
+    const protocolRecord=path.match(/^\/v1\/wallets\/([0-9a-f-]{36})\/protocol$/i);
+    if(protocolRecord&&req.method==='GET'){
+      const coinId=protocolRecord[1],fees=store.db.prepare('SELECT total_wei,checked_at FROM protocol_fees WHERE coin_id=?').get(coinId);
+      const rows=store.db.prepare("SELECT id FROM campaigns WHERE coin_id=? AND kind='shen_buyback_burn' ORDER BY created_at DESC LIMIT 5").all(coinId);
+      return send(res,200,{shareBps:1500,tokenAddress:shenTokenAddress,enabled:!!shenTokenAddress&&engine.policy.buybacksEnabled,fees:fees?{distributedWei:fees.total_wei,observedAt:fees.checked_at}:null,campaigns:rows.map(r=>campaigns.status(r.id))});
     }
     if(path==='/v1/campaigns'&&worker&&req.method==='POST')return send(res,200,{campaign:campaigns.start(await body(req))});
     const campaignRecord=path.match(/^\/v1\/campaigns\/([0-9a-f-]{36})\/record$/i);
@@ -66,7 +79,8 @@ const server=createServer(async(req,res)=>{
         const wallet=store.wallet(coinId);if(!wallet) return send(res,404,{error:'Wallet not found'});
         const head=await engine.chainReady(),blockNumber=head.number-3n;
         const balance=await client.getBalance({address:wallet.address,blockNumber});
-        return send(res,200,{coinId,address:wallet.address,tokenAddress:wallet.token_address,balanceWei:balance.toString(),block:blockNumber.toString(),observedAt:Date.now()});
+        const fees=await protocolFees.quote(wallet);
+        return send(res,200,{coinId,address:wallet.address,tokenAddress:wallet.token_address,balanceWei:balance.toString(),protocolReserveWei:fees.reserveWei,block:blockNumber.toString(),observedAt:Date.now()});
       }
       if(action==='intent'&&worker&&req.method==='POST'){
         const v=await body(req);exact(v,['id','kind','amountWei','expiresAt']);

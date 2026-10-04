@@ -5,7 +5,7 @@ import {normalizeCustomDomain,publicIpv4,requestHostname,customHostRoute} from '
 
 const config={dokployUrl:'https://deploy.shen.now',apiKey:'test-only-key',composeId:'shen-compose',ipv4:'8.8.4.4'};
 const domain='jade-agent.xyz',coinId='coin-1',challenge='test-verification-challenge-123456';
-const route={domainId:'domain-1',host:domain,composeId:config.composeId,serviceName:'gateway',domainType:'compose',port:80,path:'/',internalPath:'/',stripPath:false,https:true,certificateType:'letsencrypt',enabled:true};
+const route={domainId:'domain-1',host:domain,composeId:config.composeId,serviceName:'gateway',domainType:'compose',port:3187,path:'/',internalPath:'/',stripPath:false,https:true,certificateType:'letsencrypt',enabled:true};
 const json=data=>Response.json(data);
 
 test('domain and Host parsing reject authority confusion, IDNs and non-approved names',()=>{
@@ -34,7 +34,7 @@ test('provisioning recovers a timed out create by reading the existing exact rou
  let stored=false;const calls=[];
  const hosting=createDomainHosting(config,{fetch:async(url,init)=>{calls.push({url:String(url),...init});const method=new URL(url).pathname;
   if(method==='/api/domain.byComposeId')return json(stored?[route]:[]);
-  if(method==='/api/domain.create'){stored=true;const body=JSON.parse(init.body);assert.equal(body.serviceName,'gateway');assert.equal(body.https,true);assert.equal(body.certificateType,'letsencrypt');assert.equal(body.port,80);throw Error('connection dropped after DB commit');}
+  if(method==='/api/domain.create'){stored=true;const body=JSON.parse(init.body);assert.equal(body.serviceName,'gateway');assert.equal(body.https,true);assert.equal(body.certificateType,'letsencrypt');assert.equal(body.port,3187);throw Error('connection dropped after DB commit');}
   throw Error('Unexpected mutation');
  }});
  assert.deepEqual(await hosting.ensureRoute(domain,{allowCreate:true}),{domainId:'domain-1',created:false});

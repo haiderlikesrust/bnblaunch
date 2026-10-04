@@ -1,23 +1,6 @@
 import { IMAGE_MODEL, supportedImageModels } from './content-policy.ts';
 export class ProviderFailure extends Error{uncertain:boolean;cost:number|null;constructor(uncertain=true,cost:number|null=null){super('Provider result needs review. No automatic write retry will be attempted.');this.uncertain=uncertain;this.cost=cost}}
 type Fetcher=typeof fetch;
-const API='https://api.twitterapi.io';
-export function xProvider(apiKey:string,transport:Fetcher=fetch){
- if(!apiKey)throw Error('X provider is not configured');
- async function request(path:string,body?:unknown,form?:FormData){let response:Response;try{response=await transport(API+path,{method:body===undefined&&!form?'GET':'POST',headers:{'X-API-Key':apiKey,...(form?{}:{'Content-Type':'application/json'})},...(form?{body:form}:body===undefined?{}:{body:JSON.stringify(body)}),redirect:'error',signal:AbortSignal.timeout(60000)});}catch{throw new ProviderFailure()}
-  let result:Record<string,unknown>;try{result=await response.json() as Record<string,unknown>}catch{throw new ProviderFailure()}
-  if(!response.ok||!result||typeof result!=='object'||Array.isArray(result))throw new ProviderFailure();return result;
- }
- const success=(v:Record<string,unknown>,field:string)=>{if(v.status!=='success'||typeof v[field]!=='string'||!v[field])throw new ProviderFailure();return v[field] as string;};
- return {
-  async balance(){const r=await request('/oapi/my/info');const n=r.recharge_credits;if(typeof n!=='number'||!Number.isSafeInteger(n*10)||n<0)throw new ProviderFailure();return n*10;},
-  async user(username:string){const r=await request('/twitter/user/info?userName='+encodeURIComponent(username));const data=r.data as {id?:string;userName?:string};if(r.status!=='success'||typeof data?.id!=='string'||!/^\d+$/.test(data.id)||typeof data.userName!=='string'||data.userName.toLowerCase()!==username.toLowerCase())throw new ProviderFailure();return {id:data.id,username:data.userName};},
-  async login(input:{user_name:string;email:string;password:string;proxy:string;totp_secret?:string}){return success(await request('/twitter/user_login_v2',input),'login_cookie')},
-  async upload(session:{loginCookies:string;proxy:string},file:File){const form=new FormData();form.append('file',file);form.append('login_cookies',session.loginCookies);form.append('proxy',session.proxy);return success(await request('/twitter/upload_media_v2',undefined,form),'media_id')},
-  async post(session:{loginCookies:string;proxy:string},text:string,mediaId?:string|null){return success(await request('/twitter/create_tweet_v2',{login_cookies:session.loginCookies,proxy:session.proxy,tweet_text:text,...(mediaId?{media_ids:[mediaId]}:{})}),'tweet_id')},
-  async tweets(userId:string,id?:string){const r=await request(id?'/twitter/tweets?tweet_ids='+encodeURIComponent(id):'/twitter/user/last_tweets?userId='+encodeURIComponent(userId)+'&includeReplies=true');const nested=r.data as {tweets?:unknown[]}|undefined;const tweets=Array.isArray(r.tweets)?r.tweets:nested?.tweets;if(r.status!=='success'||!Array.isArray(tweets))throw new ProviderFailure();return tweets;},
- };
-}
 type Pricing={billable:string;unit:string;cost_usd:number;variant?:string};
 type Endpoint={provider_tag:string;pricing:Pricing[];supported_parameters:Record<string,{values?:string[]}>};
 export type ImageQuote={model:string;provider:string;cost:number;ceiling:number};

@@ -7,10 +7,10 @@ services:
     depends_on:
       web:
         condition: service_healthy
-    expose: ["80"]
+    expose: ["3187"]
     networks: [dokploy-network, app]
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3187/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -29,6 +29,7 @@ services:
       HOST: 0.0.0.0
       PORT: "3000"
       APP_ORIGIN: ${APP_ORIGIN:?Set your exact HTTPS origin}
+      SHEN_TOKEN_ADDRESS: ${SHEN_TOKEN_ADDRESS:-}
       DATABASE_URL: postgres://shen:${POSTGRES_PASSWORD:?Set a long alphanumeric password}@postgres:5432/shen
       SIGNER_URL: http://signer:8080
       SIGNER_WEB_TOKEN: ${SIGNER_WEB_TOKEN:?Set the app provisioning credential}
@@ -41,13 +42,15 @@ services:
       CHAT_DAILY_LIMIT_MICROUSD: ${CHAT_DAILY_LIMIT_MICROUSD:-0}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       BRAVE_COST_MICROUSD: ${BRAVE_COST_MICROUSD:-0}
-      TWITTERAPI_IO_KEY: ${TWITTERAPI_IO_KEY:-}
-      TWITTERAPI_IO_PROXY: ${TWITTERAPI_IO_PROXY:-}
+      X_CLIENT_ID: ${X_CLIENT_ID:-}
+      X_CLIENT_SECRET: ${X_CLIENT_SECRET:-}
+      X_API_BEARER_TOKEN: ${X_API_BEARER_TOKEN:-}
       SERVICE_CREDENTIALS_KEY: ${SERVICE_CREDENTIALS_KEY:?Set the account-session encryption key}
       X_LOGIN_DAILY_LIMIT_MICROUSD: ${X_LOGIN_DAILY_LIMIT_MICROUSD:-1000000}
-      X_POST_COST_MICROUSD: ${X_POST_COST_MICROUSD:-3000}
-      X_UPLOAD_COST_MICROUSD: ${X_UPLOAD_COST_MICROUSD:-3000}
-      X_READ_COST_MICROUSD: ${X_READ_COST_MICROUSD:-5000}
+      X_POST_COST_MICROUSD: ${X_POST_COST_MICROUSD:-15000}
+      X_POST_URL_COST_MICROUSD: ${X_POST_URL_COST_MICROUSD:-200000}
+      X_UPLOAD_COST_MICROUSD: ${X_UPLOAD_COST_MICROUSD:-}
+      X_READ_COST_MICROUSD: ${X_READ_COST_MICROUSD:-50000}
       PORKBUN_API_KEY: ${PORKBUN_API_KEY:-}
       PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:-}
       DOMAIN_AUTO_FUNDING_ENABLED: ${DOMAIN_AUTO_FUNDING_ENABLED:-false}
@@ -105,6 +108,7 @@ services:
       - shen-wallets:/data
     environment:
       SIGNER_MASTER_KEY: ${SIGNER_MASTER_KEY:?Set wallet encryption key}
+      SHEN_TOKEN_ADDRESS: ${SHEN_TOKEN_ADDRESS:-}
       SIGNER_WEB_TOKEN: ${SIGNER_WEB_TOKEN:?Set app provisioning credential}
       SIGNER_WORKER_TOKEN: ${SIGNER_WORKER_TOKEN:?Set worker signing credential}
       BNB_RPC_URL: ${BNB_RPC_URL:?Set a BNB mainnet RPC}

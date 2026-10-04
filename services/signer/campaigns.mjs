@@ -15,7 +15,7 @@ export function pendingCampaign(store,coinId){
 }
 export function campaignLeg(store,id){
  if(!store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='campaign_legs'").get())return null;
- return store.db.prepare('SELECT l.*,c.coin_id,c.status AS campaign_status,c.record AS campaign_record FROM campaign_legs l JOIN campaigns c ON c.id=l.campaign_id WHERE l.id=?').get(id);
+ return store.db.prepare('SELECT l.*,c.coin_id,c.kind AS campaign_kind,c.status AS campaign_status,c.record AS campaign_record FROM campaign_legs l JOIN campaigns c ON c.id=l.campaign_id WHERE l.id=?').get(id);
 }
 export function netReceived(logs,token,address){
  let total=0n;
@@ -67,17 +67,18 @@ export class Campaigns{
    paidWei:legs.filter(l=>l.kind==='reward'&&l.status==='confirmed').reduce((s,l)=>s+BigInt(l.amount_wei),0n).toString(),boughtTokenWei:r.boughtTokenWei??null,burnedTokenWei:r.burnedTokenWei??null,
    transactions:legs.filter(l=>l.tx_hash).slice(-100).map(l=>({id:l.id,kind:l.kind,recipient:l.recipient,amountWei:l.amount_wei,hash:l.tx_hash,status:l.status})),transactionCount:legs.filter(l=>l.tx_hash).length};
  }
- start(input){
-  if(!input||Object.keys(input).some(k=>!['id','coinId','kind','amountWei','expiresAt'].includes(k))||!UUID.test(input.id)||!UUID.test(input.coinId)||!['rewards','buyback_burn'].includes(input.kind)||!/^\d{1,78}$/.test(input.amountWei)||BigInt(input.amountWei)<=0n)throw Error('Invalid campaign');
+ start(input,system=false){
+  if(!input||Object.keys(input).some(k=>!['id','coinId','kind','amountWei','expiresAt'].includes(k))||!UUID.test(input.id)||!UUID.test(input.coinId)||!['rewards','buyback_burn',...(system?['shen_buyback_burn']:[])].includes(input.kind)||!/^\d{1,78}$/.test(input.amountWei)||BigInt(input.amountWei)<=0n)throw Error('Invalid campaign');
   const request=JSON.stringify({coinId:input.coinId,kind:input.kind,amountWei:input.amountWei,expiresAt:input.expiresAt}),prior=this.row(input.id);
   if(prior){if(prior.request!==request)throw Error('Campaign is immutable');return this.status(input.id);}
   if(!Number.isSafeInteger(input.expiresAt)||input.expiresAt<=Date.now()||input.expiresAt>Date.now()+300000)throw Error('Campaign authorization expired');
-  if(input.kind==='buyback_burn'&&!this.engine.policy.buybacksEnabled)throw Error('Buybacks are not enabled');
+  if(input.kind!=='rewards'&&!this.engine.policy.buybacksEnabled)throw Error('Buybacks are not enabled');
+  if(input.kind==='shen_buyback_burn'&&!this.engine.policy.shenTokenAddress)throw Error('Main SHEN token is not configured');
   const fence=this.store.acquire(input.coinId);
   try{
    if(!this.store.wallet(input.coinId)?.token_address)throw Error('Confirmed launch required');
    if(hasPendingDomainBridge(this.store,input.coinId)||this.store.pending(input.coinId))throw Error('Wallet payment is pending');
-   this.store.db.prepare("INSERT INTO campaigns(id,coin_id,kind,amount_wei,request,status,record,created_at) VALUES(?,?,?,?,?,'running',?,?)").run(input.id,input.coinId,input.kind,input.amountWei,request,JSON.stringify({stage:'initialize',deadline:Date.now()+86400000}),Date.now());
+   this.store.db.prepare("INSERT INTO campaigns(id,coin_id,kind,amount_wei,request,status,record,created_at) VALUES(?,?,?,?,?,'running',?,?)").run(input.id,input.coinId,input.kind,input.amountWei,request,JSON.stringify({stage:'initialize',deadline:Date.now()+86400000,...(input.kind==='shen_buyback_burn'?{targetToken:this.engine.policy.shenTokenAddress}:{})}),Date.now());
   }finally{this.store.release(input.coinId,fence);}return this.status(input.id);
  }
  addLeg(c,position,kind,amount,recipient=null,gas=null){
@@ -86,7 +87,7 @@ export class Campaigns{
  async tick(id){
   let c=this.row(id);if(!c)throw Error('Campaign not found');if(terminal(c.status))return this.status(id);
   const lease=randomUUID();if(!this.store.db.prepare('UPDATE campaigns SET lease=?,lease_until=? WHERE id=? AND lease_until<?').run(lease,Date.now()+120000,id,Date.now()).changes)throw Error('Campaign is busy');
-  const r=JSON.parse(c.record),wallet=this.store.wallet(c.coin_id),token=wallet.token_address;
+  const r=JSON.parse(c.record),wallet=this.store.wallet(c.coin_id),token=c.kind==='shen_buyback_burn'?r.targetToken:wallet.token_address;
   const save=(status='running')=>{if(!this.store.db.prepare('UPDATE campaigns SET status=?,record=? WHERE id=? AND lease=? AND lease_until>?').run(status,JSON.stringify(r),id,lease,Date.now()).changes)throw Error('Campaign lease expired');};
   try{
    await this.engine.bindLaunch(c.coin_id,wallet.launch_hash);
@@ -97,7 +98,12 @@ export class Campaigns{
     const head=await this.engine.chainReady(),snapshot=head.number-12n,block=await this.client.getBlock({blockNumber:snapshot}),launch=await this.client.getTransactionReceipt({hash:wallet.launch_hash});
     if(snapshot<launch.blockNumber)throw Error('Launch awaits snapshot confirmations');
     const balance=await this.client.getBalance({address:wallet.address,blockNumber:snapshot});
-    if(BigInt(c.amount_wei)+this.engine.policy.gasReserveWei>balance)throw Error('Insufficient campaign funds');
+    let protocolReserve=await this.engine.protocolReserve(wallet);
+    if(c.kind==='shen_buyback_burn'){
+     if(!same(token,this.engine.policy.shenTokenAddress)||BigInt(c.amount_wei)>protocolReserve)throw Error('Protocol campaign exceeds accrued fees or token changed');
+     protocolReserve-=BigInt(c.amount_wei);
+    }
+    if(BigInt(c.amount_wei)+this.engine.policy.gasReserveWei+protocolReserve>balance)throw Error('Insufficient campaign funds');
     r.snapshotBlock=snapshot.toString();r.snapshotHash=block.hash;r.cursor=launch.blockNumber.toString();r.balances={};r.holders={};r.validated=0;
     r.rangeSize=2000;r.stage=c.kind==='rewards'?'index':'buy';save();return this.status(id);
    }
@@ -136,7 +142,7 @@ export class Campaigns{
      }else save();return this.status(id);
     }
    }
-   if(c.kind==='buyback_burn'&&r.stage==='buy'&&!this.legs(id).length)this.addLeg(c,0,'buyback',c.amount_wei);
+   if(c.kind!=='rewards'&&r.stage==='buy'&&!this.legs(id).length)this.addLeg(c,0,'buyback',c.amount_wei);
    const legs=this.legs(id),leg=legs.find(l=>!['confirmed','reverted','expired'].includes(l.status));
    if(leg){
     let intent=this.store.intent(leg.id);
@@ -148,7 +154,7 @@ export class Campaigns{
     if(intent)this.store.db.prepare('UPDATE campaign_legs SET status=?,tx_hash=? WHERE id=?').run(intent.status,intent.tx_hash,leg.id);
     return this.status(id);
    }
-   if(c.kind==='buyback_burn'){
+   if(c.kind!=='rewards'){
     const buy=legs[0];if(buy?.status!=='confirmed'){r.reason='Buy did not confirm; no burn was attempted';save('failed');return this.status(id);}
     await this.engine.reconcile(buy.id);
     if(r.stage==='buy'){

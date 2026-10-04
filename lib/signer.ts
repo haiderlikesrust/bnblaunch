@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { isAddress, type Address } from "viem";
 import { AppError, db } from "./server";
 import type { Coin } from "./model";
-import { xAccount } from './social-config';
+import { xAccount, xConnected } from './social-config';
 
 export async function signerRequest<T>(path:string,data?:unknown):Promise<T>{
   if(!env.SIGNER_URL||!env.SIGNER_WEB_TOKEN||env.SIGNER_WEB_TOKEN.length<40)throw new AppError(503,"Agent wallets are not configured yet. Your launch plan is saved.");
@@ -22,7 +22,7 @@ export async function agentWallet(coinId:string){
   return value.address as Address;
 }
 export async function launchReadiness(coin:Coin){
-  if(coin.social&&!await xAccount(coin.id))return {ready:false,reason:"Connect and verify the coin’s X account below before launching."};
+  if(coin.social&&!xConnected(await xAccount(coin.id)))return {ready:false,reason:"Connect and verify the coin’s X account below before launching."};
   const required=["funding-reconciliation","cost-reservations","autonomous-planning","transaction-execution",...(coin.website?["website-publishing"]:[]),...(coin.social?["x-publishing"]:[]),...(coin.research?["brave-research"]:[]),...(coin.images?["image-publishing"]:[])];
   if(!env.SIGNER_URL||!env.SIGNER_WEB_TOKEN)return {ready:false,reason:"Agent wallet service needs to be connected."};
   if(!env.OPENROUTER_API_KEY)return {ready:false,reason:"Agent compute needs to be configured."};

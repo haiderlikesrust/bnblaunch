@@ -5,6 +5,7 @@ import { Plus, Search, Bot, Activity, Layers, Network, Radio, CircleDollarSign }
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "sonner";
 import ShenHeader from "./shen-header";
+import ShenFooter from "./shen-footer";
 import TokenCard from "./token-card";
 import CreateLaunch from "./create-launch";
 import ShenDocs from "./shen-docs";
@@ -34,5 +35,5 @@ export default function ShenApp({page="discover",coinId}:{page?:string;coinId?:s
   {page==="launch"&&<CreateLaunch lang={lang} t={t}/>}{page==="docs"&&<ShenDocs t={t}/>}
   {page==="token"&&(coin?<TokenView key={coin.id} coin={coin} lang={lang} t={t} canManage={canManage}/>:<div className="empty-state"><Bot/><h1>{loading?t("正在加载…","Loading agent…"):t("智能体不可用","Agent unavailable")}</h1><p>{error}</p><Link className="button secondary" href="/">{t("探索智能体","Discover agents")}</Link>{signIn&&<a href={"/signin?return_to="+encodeURIComponent("/token/"+coinId)} target="_top">{t("登录","Sign in")}</a>}</div>)}
   {page==="activity"&&<><div className="page-heading"><span className="overline accent">THE RECORD</span><h1>{t("每一步，都有记录。","Every action leaves a record.")}</h1></div><div className="panel">{error?<p role="alert">{error}</p>:recordList(events)}</div></>}
- </main><footer className="shen-footer"><Link href="/" className="footer-brand" translate="no">SHEN<span>.</span><small>神</small></Link><span>{t("自主行动，始于透明。","AUTONOMY STARTS WITH TRANSPARENCY.")}</span><div><Link href="/docs">{t("文档","DOCS")}</Link><a href="https://flap.sh" target="_blank" rel="noreferrer">BUILT ON FLAP</a><span>BNB CHAIN / 56</span></div></footer></div>
+ </main><ShenFooter t={t}/></div>
 }

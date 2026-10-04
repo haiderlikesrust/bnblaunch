@@ -1,11 +1,15 @@
 "use client";
+import { useEffect, useState } from "react";
 import { Check, Cpu, ShieldCheck } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { AGENT_MODELS, DEFAULT_AGENT_MODEL, type AgentModelId } from "@/lib/agent-models";
+import AgentCharacter from "./agent-character";
 import ModelLogo from "./model-logo";
 import type { T } from "@/lib/ui";
 
-export default function AgentSetup({purpose,modelId,onPurpose,onModel,t}:{purpose:string;modelId:string;onPurpose:(value:string)=>void;onModel:(value:AgentModelId)=>void;t:T}){
+export default function AgentSetup({purpose,modelId,onPurpose,onModel,personality,focus,onCharacter,t}:{purpose:string;modelId:string;personality:string;focus:string;onCharacter:(value:{personality:string;focus:string})=>void;onPurpose:(value:string)=>void;onModel:(value:AgentModelId)=>void;t:T}){
+ const [prices,setPrices]=useState<Record<string,{available:boolean;inputPerMillionUsd?:number;outputPerMillionUsd?:number}>>({});
+ useEffect(()=>{let alive=true;async function load(){try{const r=await fetch("/api/models/pricing"),data=await r.json() as {models:({id:string;available:boolean;inputPerMillionUsd?:number;outputPerMillionUsd?:number})[]};if(r.ok&&alive)setPrices(Object.fromEntries(data.models.map(m=>[m.id,m])))}catch{}}void load();const timer=setInterval(()=>void load(),60000);return()=>{alive=false;clearInterval(timer)}},[]);
  return <div className="agent-definition">
   <div className="agent-field-heading"><div><span className="overline accent">01 / MISSION</span><h3>{t("它为何而存在？","What is this agent here to do?")}</h3></div><span className="developer-tag">{t("开发者设定","Developer-defined")}</span></div>
   <label className="form-field" htmlFor="agent-purpose">{t("智能体使命 / 自定义指令","Agent purpose / custom instructions")}
@@ -15,8 +19,9 @@ export default function AgentSetup({purpose,modelId,onPurpose,onModel,t}:{purpos
   <div className="agent-field-heading"><div><span className="overline accent">02 / INTELLIGENCE</span><h3>{t("选择它的思维引擎。","Choose the mind behind it.")}</h3></div><Cpu size={21}/></div>
   <RadioGroup className="model-options" aria-label={t("智能体模型","Agent model")} value={modelId||DEFAULT_AGENT_MODEL} onValueChange={v=>onModel(v as AgentModelId)}>
    {AGENT_MODELS.map(m=><label key={m.id} className={"model-option "+(modelId===m.id?"selected":"")} htmlFor={"model-"+m.family}>
-    <RadioGroupItem id={"model-"+m.family} value={m.id} className="model-radio"/><span className="model-glyph"><ModelLogo modelId={m.id} size={36}/></span><span className="model-option-copy"><strong>{m.name}</strong><small>{m.maker}</small><span>{t(m.descriptionZh,m.description)}</span></span>{modelId===m.id&&<Check className="model-check" size={16}/>}</label>)}
+    <RadioGroupItem id={"model-"+m.family} value={m.id} className="model-radio"/><span className="model-glyph"><ModelLogo modelId={m.id} size={36}/></span><span className="model-option-copy"><strong>{m.name}</strong><small>{m.maker}</small><span>{t(m.descriptionZh,m.description)}</span><small>{prices[m.id]?.available?`${prices[m.id].inputPerMillionUsd?.toFixed(3)} / ${prices[m.id].outputPerMillionUsd?.toFixed(3)} ${t("每百万输入 / 输出词元","per 1M input / output tokens")}`:t("价格暂不可用","Pricing unavailable")}</small></span>{modelId===m.id&&<Check className="model-check" size={16}/>}</label>)}
   </RadioGroup>
+  <AgentCharacter personality={personality} focus={focus} onChange={onCharacter} t={t}/>
   <div className="agent-boundary"><ShieldCheck size={19}/><p>{t("使命与模型由开发者设定。社区可以提问，但聊天不能下达任务或改变智能体的行为。","The developer sets the mission and model. The community can ask questions; chat cannot assign tasks or change the agent’s behavior.")}</p></div>
  </div>
 }

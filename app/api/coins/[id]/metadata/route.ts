@@ -1,3 +1,5 @@
+import { env } from "cloudflare:workers";
+import { coinUrl } from "@/lib/coin-links";
 import { z } from "zod";
 import { AppError, body, db, failure, identity, ownedCoin, remoteJson, response } from "@/lib/server";
 import { validateImage } from "@/lib/token-image";
@@ -23,7 +25,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
   file=value;
  }
  const data=new FormData();
- data.append("operations",JSON.stringify({query:"mutation Create($file: Upload!, $meta: MetadataInput!) { create(file: $file, meta: $meta) }",variables:{file:null,meta:{website:null,twitter:null,telegram:null,description:coin.description,creator:owner}}}));
+ data.append("operations",JSON.stringify({query:"mutation Create($file: Upload!, $meta: MetadataInput!) { create(file: $file, meta: $meta) }",variables:{file:null,meta:{website:coinUrl(env.APP_ORIGIN||new URL(request.url).origin,coin.id),twitter:null,telegram:null,description:coin.description,creator:owner}}}));
  data.append("map",JSON.stringify({"0":["variables.file"]}));data.append("0",file);
  const result=await remoteJson<{data?:{create:string};errors?:unknown[]}>("https://funcs.flap.sh/api/upload",{method:"POST",body:data});
  if(result.errors||!result.data?.create)throw new AppError(502,"Flap metadata upload failed");

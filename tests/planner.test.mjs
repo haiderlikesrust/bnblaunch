@@ -82,6 +82,38 @@ for(const invalid of ['missing','negative','unsafe','over-ceiling'])test(`a ${in
 test('an expired planning lease cannot publish a website',async()=>{
  const f=fixture();try{f.expire();await assert.rejects(runAgentTick(['autonomous-planning']),/lease expired/);assert.equal(await publishedWebsite('coin'),null);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0)}finally{f.close()}
 });
+
+test('approved plans persist coin-scoped memory and the next cycle receives it',async()=>{
+ const f=fixture();try{
+  f.output({...plan,memory:'Follow up on the community website and verify its published revision.'});
+  await runAgentTick(['autonomous-planning']);
+  const saved=f.sql.prepare('SELECT summary,next_steps FROM agent_memories WHERE coin_id=?').get('coin');
+  assert.equal(saved.summary,plan.summary);assert.match(saved.next_steps,/verify its published revision/);
+  f.due();await runAgentTick(['autonomous-planning']);
+  const memory=JSON.parse(f.calls[2].messages[1].content).memory;
+  assert.match(memory.kind,/not proof of execution/);assert.equal(memory.entries[0].nextSteps,saved.next_steps);
+  const {agentMemory}=await import('../lib/agent-memory.ts');assert.deepEqual((await agentMemory('another-coin')).entries,[]);
+ }finally{f.close()}
+});
+
+for(const mode of ['rejected','expired'])test(`${mode} plans cannot write agent memory`,async()=>{
+ const f=fixture();try{
+  if(mode==='rejected'){f.reject();await runAgentTick(['autonomous-planning']);}
+  else{f.expire();await assert.rejects(runAgentTick(['autonomous-planning']),/lease expired/);}
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_memories').get().n,0);
+ }finally{f.close()}
+});
+
+test('model usage records actual token receipts and preserves unknown costs for reconciliation',async()=>{
+ const f=fixture();try{
+  f.modifyReply(reply=>({...reply,id:'generation-receipt',usage:{cost:.0001,prompt_tokens:101,completion_tokens:22,prompt_tokens_details:{cached_tokens:12},completion_tokens_details:{reasoning_tokens:8}}}));
+  await runAgentTick(['autonomous-planning']);
+  const usage=f.sql.prepare('SELECT * FROM model_usage ORDER BY created_at').all();assert.equal(usage.length,2);
+  assert.equal(usage[0].prompt_tokens,101);assert.equal(usage[0].cached_tokens,12);assert.equal(usage[0].reasoning_tokens,8);assert.equal(usage[0].cost_microusd,100);assert.equal(usage[0].status,'recorded');
+  f.due();f.modifyReply(reply=>{delete reply.usage;return reply});await assert.rejects(runAgentTick(['autonomous-planning']),/awaiting reconciliation/);
+  const unknown=f.sql.prepare("SELECT * FROM model_usage WHERE status='reconciliation_required'").get();assert.equal(unknown.cost_microusd,null);assert.equal(unknown.prompt_tokens,null);
+ }finally{f.close()}
+});
 test('website content rejects arbitrary code fields, links and unsupported themes',()=>{
  for(const invalid of [{...site,html:'<script>alert(1)</script>'},{...site,url:'https://evil.example'},{...site,theme:'javascript:'},{...site,sections:[{heading:'Hello',body:'Text',script:'x'}]}])assert.equal(agentPlan.safeParse({...plan,website:invalid}).success,false);
 });

@@ -1,8 +1,9 @@
+import { xProvider } from '../lib/x-official.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { xProvider, imageQuote, generateImage } from '../lib/content-providers.ts';
+import { imageQuote, generateImage } from '../lib/content-providers.ts';
 import { publicationInput, matchingTweet } from '../lib/content-policy.ts';
 import { sealServiceSecret, openServiceSecret } from '../shared/service-secrets.mjs';
 const json=v=>new Response(JSON.stringify(v),{headers:{'Content-Type':'application/json'}});
@@ -16,17 +17,17 @@ test('image generation pins a quoted provider and requires a valid image plus ac
  await assert.rejects(generateImage('test-key',quote,'Artwork',async()=>new Response('',{status:502})),e=>!e.uncertain&&e.cost===0);
  await assert.rejects(imageQuote(undefined,async()=>json({endpoints:[{...quoteResponse.endpoints[0],pricing:[{billable:'output_image',unit:'token',cost_usd:.04}]}]})));
 });
-test('X transport uses documented cookie fields and binary multipart upload without leaking provider errors',async()=>{
- const calls=[];const provider=xProvider('test-key',async(url,init)=>{calls.push({url,init});if(url.includes('user_login'))return json({status:'success',login_cookie:'private-session'});if(url.includes('upload'))return json({status:'success',media_id:'321'});if(url.includes('create_tweet'))return json({status:'success',tweet_id:'123'});return json({status:'success',data:{tweets:[]}})});
- const cookie=await provider.login({user_name:'shen',email:'example@example.com',password:'disposable',proxy:'http://example.test:80'});assert.equal(cookie,'private-session');
- await provider.upload({loginCookies:cookie,proxy:'http://example.test:80'},new File(['png'],'art.png',{type:'image/png'}));
- assert.equal(calls[1].init.body.get('login_cookies'),cookie);assert.equal(calls[1].init.headers['Content-Type'],undefined);assert.ok(calls[1].init.body.get('file') instanceof File);
- await provider.post({loginCookies:cookie,proxy:'http://example.test:80'},'An update','321');assert.deepEqual(JSON.parse(calls[2].init.body).media_ids,['321']);
- assert.deepEqual(await provider.tweets('1'),[]);
- await assert.rejects(xProvider('key',async()=>json({recharge_credits:null})).balance());
- await assert.rejects(xProvider('key',async()=>json({status:'success',data:{id:123,userName:'shen'}})).user('shen'));
- await assert.rejects(xProvider('key',async()=>json({status:'error',msg:'private-session'})).post({loginCookies:cookie,proxy:'x'},'post'),e=>!e.message.includes(cookie));
+test('official X transport uses bearer tokens, multipart media and exact post payloads',async()=>{
+ const calls=[];const provider=xProvider('billing',async(url,init)=>{calls.push({url,init});if(url.endsWith('/media/upload'))return json({data:{id:'321'}});if(url.endsWith('/2/tweets'))return json({data:{id:'123'}});if(url.includes('/usage/credits'))return json({data:{total_balance:12.5}});return json({data:[]})});
+ const session={accessToken:'private-access'};
+ await provider.upload(session,new File(['png'],'art.png',{type:'image/png'}));
+ assert.equal(calls[0].init.headers.Authorization,'Bearer private-access');assert.equal(calls[0].init.body.get('media_category'),'tweet_image');assert.ok(calls[0].init.body.get('media') instanceof File);
+ await provider.post(session,'An update','321');assert.deepEqual(JSON.parse(calls[1].init.body),{text:'An update',media:{media_ids:['321']}});
+ assert.deepEqual(await provider.tweets(session,'1'),[]);assert.equal(await provider.balance(),12500000);
+ await assert.rejects(xProvider('key',async()=>json({data:{total_balance:null}})).balance());
+ await assert.rejects(xProvider('key',async()=>new Response('private-access',{status:401})).post(session,'post'),e=>!e.message.includes(session.accessToken));
 });
+
 test('X text validation covers Chinese weights and reconciliation rejects wrong identity, duplicates and retweets',()=>{
  const base={destination:'x',text:'中'.repeat(140),imagePrompt:null,altText:''};assert.equal(publicationInput.safeParse(base).success,true);assert.equal(publicationInput.safeParse({...base,text:'中'.repeat(141)}).success,false);
  const now=Date.now(),expect={userId:'1',text:'Verified update',startedAt:now},tweet={id:'22',author:{id:'1'},text:expect.text,createdAt:new Date(now).toISOString()};
@@ -36,7 +37,7 @@ test('X text validation covers Chinese weights and reconciliation rejects wrong 
  const photo={...tweet,text:'Verified update https://t.co/media',extendedEntities:{media:[{id_str:'999',url:'https://t.co/media'}]}};assert.equal(matchingTweet([photo],{...expect,mediaId:'999'}),'22');
 });
 test('encrypted X sessions are bound to coin, immutable account and version',async()=>{
- const key=randomBytes(32).toString('hex'),context='coin:123:version1',data={loginCookies:'private-cookie',proxy:'private-proxy'};
- const cipher=await sealServiceSecret(key,context,data);assert.ok(!cipher.includes(data.loginCookies));assert.deepEqual(await openServiceSecret(key,context,cipher),data);
+ const key=randomBytes(32).toString('hex'),context='coin:123:version1',data={accessToken:'private-access',refreshToken:'private-refresh'};
+ const cipher=await sealServiceSecret(key,context,data);assert.ok(!cipher.includes(data.accessToken));assert.deepEqual(await openServiceSecret(key,context,cipher),data);
  await assert.rejects(openServiceSecret(key,'different:123:version1',cipher));await assert.rejects(openServiceSecret(randomBytes(32).toString('hex'),context,cipher));
 });

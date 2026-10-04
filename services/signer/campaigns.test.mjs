@@ -48,6 +48,29 @@ test('combined buy and burn burns only tokens from the confirmed buy receipt and
   const burn=parseTransaction(f.raws[1]);const decoded=decodeFunctionData({abi:parseAbi(['function transfer(address,uint256) returns(bool)']),data:burn.data});assert.equal(decoded.args[0].toLowerCase(),DEAD);assert.equal(decoded.args[1],500n);
  }finally{f.store.close();}
 });
+
+test('system SHEN campaign signs for the fixed main token and burns only its own purchase receipt',async()=>{
+ const f=fixture('buyback_burn'),shen='0x5555555555555555555555555555555555557777';try{
+  const row=f.campaigns.row(f.input.id),record={...JSON.parse(row.record),targetToken:shen};
+  f.store.db.prepare("UPDATE campaigns SET kind='shen_buyback_burn',record=? WHERE id=?").run(JSON.stringify(record),row.id);
+  f.engine.policy.shenTokenAddress=shen;f.engine.protocolReserve=async()=>1000000n;
+  const original=f.client.getTransactionReceipt;
+  f.client.getTransactionReceipt=async(args)=>{
+   const receipt=await original(args);
+   const raw=f.raws.find(r=>keccak256(r)===args.hash);
+   if(!raw)return receipt;
+   const tx=parseTransaction(raw);
+   if(tx.to.toLowerCase()===shen){
+    const decoded=decodeFunctionData({abi:parseAbi(['function transfer(address,uint256) returns(bool)']),data:tx.data});
+    return {...receipt,logs:[{...log(f.wallet.address,decoded.args[0],decoded.args[1]),address:shen}]};
+   }
+   return {...receipt,logs:receipt.logs.map(l=>({...l,address:shen}))};
+  };
+  const result=await finish(f);assert.equal(result.status,'complete');assert.equal(result.burnedTokenWei,'500');assert.equal(f.raws.length,2);
+  assert.equal(parseTransaction(f.raws[1]).to.toLowerCase(),shen);
+  await f.campaigns.tick(f.input.id);assert.equal(f.raws.length,2);
+ }finally{f.store.close()}
+});
 test('snapshot reorg and unapproved reward intent fail before money moves',async()=>{
  const f=fixture();try{await f.campaigns.tick(f.input.id);f.state.canonical='0x'+'c'.repeat(64);await assert.rejects(f.campaigns.tick(f.input.id),/reorganized/);assert.equal(f.raws.length,0);
   await assert.rejects(f.engine.execute({id:randomUUID(),coinId:f.input.coinId,kind:'reward',amountWei:'100',expiresAt:Date.now()+60000}));

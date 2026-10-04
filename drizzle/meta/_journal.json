@@ -127,6 +127,27 @@
       "when": 1791041742501,
       "tag": "0017_next_richard_fisk",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1791076698067,
+      "tag": "0018_omniscient_scorpion",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1791076983316,
+      "tag": "0019_ambiguous_nicolaos",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1791077414903,
+      "tag": "0020_gorgeous_slipstream",
+      "breakpoints": true
     }
   ]
 }

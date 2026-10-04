@@ -49,7 +49,7 @@ export function createDomainHosting(input:HostingConfig,dependencies:Dependencie
  }
  function matchRoute(value:unknown,domain:string):Route{
   const route=value as Route;
-  if(!route||typeof route!=='object'||typeof route.domainId!=='string'||!route.domainId||route.host!==domain||route.composeId!==config.composeId||route.serviceName!=='gateway'||route.port!==80||route.path!=='/'||route.https!==true||route.certificateType!=='letsencrypt'||route.domainType!=='compose'||(route.internalPath??'/')!=='/'||(route.stripPath!==undefined&&route.stripPath!==false)||(route.enabled!==undefined&&route.enabled!==true)||(route.forwardAuthEnabled!==undefined&&route.forwardAuthEnabled!==false)||(route.middlewares!=null&&(!Array.isArray(route.middlewares)||route.middlewares.length>0))||route.applicationId||route.previewDeploymentId||route.customCertResolver||route.customEntrypoint)throw new HostingError('route_conflict','An existing domain route does not match SHEN hosting. No route was changed.');
+  if(!route||typeof route!=='object'||typeof route.domainId!=='string'||!route.domainId||route.host!==domain||route.composeId!==config.composeId||route.serviceName!=='gateway'||route.port!==3187||route.path!=='/'||route.https!==true||route.certificateType!=='letsencrypt'||route.domainType!=='compose'||(route.internalPath??'/')!=='/'||(route.stripPath!==undefined&&route.stripPath!==false)||(route.enabled!==undefined&&route.enabled!==true)||(route.forwardAuthEnabled!==undefined&&route.forwardAuthEnabled!==false)||(route.middlewares!=null&&(!Array.isArray(route.middlewares)||route.middlewares.length>0))||route.applicationId||route.previewDeploymentId||route.customCertResolver||route.customEntrypoint)throw new HostingError('route_conflict','An existing domain route does not match SHEN hosting. No route was changed.');
   return route;
  }
  async function findRoute(domainInput:string){
@@ -64,7 +64,7 @@ export function createDomainHosting(input:HostingConfig,dependencies:Dependencie
   if(!options.allowCreate)return null;
   // The caller must durably record its create attempt first. After an uncertain response,
   // call with allowCreate:false to reconcile; never issue a second blind create.
-  try{const result=await api('domain.create',{host:domain,composeId:config.composeId,serviceName:'gateway',domainType:'compose',port:80,path:'/',internalPath:'/',stripPath:false,https:true,certificateType:'letsencrypt',middlewares:[],forwardAuthEnabled:false});const route=matchRoute(result,domain);return {domainId:route.domainId,created:true};}
+  try{const result=await api('domain.create',{host:domain,composeId:config.composeId,serviceName:'gateway',domainType:'compose',port:3187,path:'/',internalPath:'/',stripPath:false,https:true,certificateType:'letsencrypt',middlewares:[],forwardAuthEnabled:false});const route=matchRoute(result,domain);return {domainId:route.domainId,created:true};}
   catch(error){const recovered=await findRoute(domain).catch(()=>null);if(recovered)return {domainId:recovered.domainId,created:false};if(error instanceof HostingError){error.uncertain=true;throw error;}throw new HostingError('response_unknown','Domain creation requires reconciliation.',true);}
  }
  async function composeStatus(){

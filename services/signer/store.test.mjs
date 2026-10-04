@@ -32,6 +32,15 @@ test('coin wallets are isolated, idempotent, and encrypted with coin-bound AAD',
     const box=JSON.parse(row.sealed_key);box.tag=Buffer.alloc(16).toString('base64');assert.throws(()=>store.open(JSON.stringify(box),aad));
   }finally{store.close()}
 });
+
+test('ordinary agent payments cannot spend the reserved SHEN allocation',async()=>{
+ const {store,id}=fixture();try{
+  const engine=new SigningEngine(store,{getChainId:async()=>56,getBlock:async()=>({number:100n,timestamp:BigInt(Math.floor(Date.now()/1000))}),getTransactionCount:async()=>0,getBalance:async()=>110n,getGasPrice:async()=>1n,estimateGas:async()=>1n},{settlementAddress:recipient,gasReserveWei:1n,maxGasPriceWei:2n});
+  engine.bindLaunch=async()=>{};engine.protocolFees={quote:async()=>({reserveWei:'15'})};
+  await assert.rejects(engine.execute({id,coinId:coin,kind:'compute',amountWei:'100',expiresAt:Date.now()+60000}),/protocol reserves/);
+  assert.equal(store.signedBytes(id),null);
+ }finally{store.close()}
+});
 test('wallet recovery survives reopening; wrong master key fails',()=>{
   const dir=mkdtempSync(join(tmpdir(),'shen-wallet-test-')),path=join(dir,'wallet.sqlite'),master=key();
   try{const first=new WalletStore(path,master),wallet=first.provision(coin),row=first.wallet(coin),secret=first.open(row.sealed_key,`wallet:v1:56:${coin}:${row.address}`);first.close();

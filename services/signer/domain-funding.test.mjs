@@ -65,6 +65,14 @@ test('checkout and x402 validators reject alternate sessions, assets, domains, a
  assert.throws(()=>validateCheckout({...checkout(),payUrl:'https://payments.coinbase.com/payment-sessions/paymentSession_OTHER'},1500));
  for(const alter of [c=>c.accepts[0].amount='16000000',c=>c.accepts[0].asset=merchant,c=>c.accepts[0].network='eip155:56',c=>c.accepts[0].extra.name='USDC',c=>c.accepts[0].extra.assetTransferMethod='permit2',c=>c.resource.url='https://evil.test',c=>c.extensions={unknown:{}}]){const c=challenge();alter(c);assert.throws(()=>validateX402(c,{url,amountCents:1500}));}
 });
+
+test('a domain bridge cannot spend funds reserved for SHEN',async()=>{
+ const f=fixture();try{
+  f.funding.start(f.input);await f.tick();await f.tick();
+  f.funding.protocolReserve=async()=>1000000000000000000n;
+  await assert.rejects(f.tick(),/protocol reserves/);assert.equal(f.funding.status(f.id).status,'quoted');assert.equal(f.state.broadcasts.length,0);
+ }finally{f.close()}
+});
 test('durable complete workflow signs only one BNB deposit and one exact USDC authorization; credit requires both receipts and registrar confirmation',async()=>{
  const f=fixture();try{
   assert.equal(f.funding.start(f.input).status,'created');assert.equal(hasPendingDomainBridge(f.store,f.coinId),true);assert.deepEqual(f.funding.start(f.input),f.funding.status(f.id));assert.throws(()=>f.funding.start({...f.input,amountCents:1600}),/immutable/);

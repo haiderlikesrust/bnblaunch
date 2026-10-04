@@ -43,7 +43,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
   let result;
   try{result=await guardedAnswer(message,chatSnapshot(coin),coin.language,async(kind,system,data)=>{
    await ensureOpen();unresolvedProviderCall=true;
-   try{const completion=await chatCompletion(kind==="answer"?answer:guard,system,data);unresolvedProviderCall=false;cost+=completion.cost;return completion.text;}
+   try{const completion=await chatCompletion(kind==="answer"?answer:guard,system,data,800,32000,{coinId:coin.id,runId:reservation.id,kind});unresolvedProviderCall=false;cost+=completion.cost;return completion.text;}
    catch(e){if(e instanceof PaidCompletionRejected){unresolvedProviderCall=false;cost+=e.cost;}else if(e instanceof AppError&&(e.status===413||e.status===412))unresolvedProviderCall=false;throw e;}
   });await ensureOpen()}catch(e){if(!unresolvedProviderCall)await settleChat(reservation,cost);throw e}
   await settleChat(reservation,cost);

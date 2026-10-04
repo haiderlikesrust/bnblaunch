@@ -17,6 +17,7 @@ async function cycle(){
   try{await site({action:'index'});}catch{console.warn('Curve indexing awaits an available canonical RPC range.');}
   const authority=await request(signer,'/v1/status',env.SIGNER_WORKER_TOKEN);
   if(!authority.signingReady||!authority.workerAuthorized||authority.chainId!==56)throw Error('Worker signing authority unavailable');
+  try{await request(signer,'/v1/protocol/tick',env.SIGNER_WORKER_TOKEN,{});}catch{console.warn('Protocol fee processing awaits confirmed routing, funds or reconciliation.');}
   const {operations,domainFunding=[]}=await site();
   for(const job of domainFunding){
     if(stopping)break;

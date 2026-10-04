@@ -21,6 +21,14 @@ const summary = row => ({id:row.id,coinId:row.coin_id,kind:row.kind,amountWei:ro
 
 export class SigningEngine {
   constructor(store, client, policy) { this.store=store;this.client=client;this.policy=policy; }
+  async protocolReserve(wallet){return this.protocolFees?BigInt((await this.protocolFees.quote(wallet)).reserveWei):0n;}
+  transactionToken(row,wallet){
+    const leg=row.id?campaignLeg(this.store,row.id):null;
+    if(leg?.campaign_kind!=='shen_buyback_burn')return wallet.token_address;
+    const token=JSON.parse(leg.campaign_record).targetToken;
+    if(!token||!same(token,this.policy.shenTokenAddress))throw Error('Protocol token configuration changed; reconciliation required');
+    return token;
+  }
   async chainReady() {
     if(await this.client.getChainId()!==56) throw Error('RPC must be BNB Chain');
     const block=await this.client.getBlock();
@@ -46,7 +54,7 @@ export class SigningEngine {
     return {coinId,address:wallet.address,tokenAddress:token,hash};
   }
   async requestTransaction(row, wallet) {
-    const amount=BigInt(row.amount_wei),token=wallet.token_address;
+    const amount=BigInt(row.amount_wei),token=this.transactionToken(row,wallet);
     if(row.kind==='compute') {
       if(!this.policy.settlementAddress) throw Error('Settlement recipient is not configured');
       const bounds=serviceFundingBounds(this.policy.settlementAddress);
@@ -125,7 +133,12 @@ export class SigningEngine {
       const gas=estimated*120n/100n;if(gas>2000000n) throw Error('Gas estimate exceeds transaction policy');
       if(row.kind==='reward'&&(!leg?.gas_limit_wei||gas*gasPrice>BigInt(leg.gas_limit_wei)))throw Error('Reward gas exceeds its reserved allowance');
       const cost=transaction.value+gas*gasPrice,available=balance<confirmed?balance:confirmed;
-      if(available<cost+this.policy.gasReserveWei) throw Error('Insufficient confirmed funds after gas reserve');
+      let protocolReserve=await this.protocolReserve(wallet);
+      if(leg?.campaign_kind==='shen_buyback_burn'&&row.kind==='buyback'){
+        if(BigInt(row.amount_wei)>protocolReserve)throw Error('Protocol buy exceeds accrued fee allocation');
+        protocolReserve-=BigInt(row.amount_wei);
+      }
+      if(available<cost+this.policy.gasReserveWei+protocolReserve) throw Error('Insufficient confirmed funds after gas and protocol reserves');
       const expected={...transaction,nonce,gas,gasPrice};
       const raw=await this.store.account(row.coin_id).signTransaction({...expected,chainId:56,type:'legacy'});
       await this.store.persistSigned(row.id,fence,raw,expected);
@@ -144,8 +157,9 @@ export class SigningEngine {
       if(canonical.hash!==receipt.blockHash) throw Error('Transaction receipt changed; reconciliation required');
       if(row.receipt_hash&&row.receipt_hash!==receipt.blockHash) throw Error('Confirmed transaction reorganized; reconciliation required');
       if(head.number-receipt.blockNumber>=3n){
-        if(receipt.status==='success'&&row.kind==='buyback'&&netReceived(receipt.logs??[],this.store.wallet(row.coin_id).token_address,this.store.wallet(row.coin_id).address)<=0n)throw Error('Buy receipt has no verified tokens received');
-        if(receipt.status==='success'&&row.kind==='burn'&&netReceived(receipt.logs??[],this.store.wallet(row.coin_id).token_address,BURN_SINK)!==BigInt(row.amount_wei))throw Error('Burn-sink receipt does not prove the authorized amount');
+        const wallet=this.store.wallet(row.coin_id),token=this.transactionToken(row,wallet);
+        if(receipt.status==='success'&&row.kind==='buyback'&&netReceived(receipt.logs??[],token,wallet.address)<=0n)throw Error('Buy receipt has no verified tokens received');
+        if(receipt.status==='success'&&row.kind==='burn'&&netReceived(receipt.logs??[],token,BURN_SINK)!==BigInt(row.amount_wei))throw Error('Burn-sink receipt does not prove the authorized amount');
         this.store.finish(id,receipt);
       }
       return summary(this.store.intent(id));

@@ -2,6 +2,7 @@ declare namespace Cloudflare {
   interface Env {
     DB?: D1Database;
     APP_ORIGIN?: string;
+    SHEN_TOKEN_ADDRESS?: string;
     SHEN_RUNTIME?: string;
     OPENROUTER_API_KEY?: string;
     OPENROUTER_IMAGE_MODEL?: string;
@@ -13,8 +14,10 @@ declare namespace Cloudflare {
     SIGNER_SETTLEMENT_ADDRESS?: string;
     OPENROUTER_MANAGEMENT_KEY?: string;
     BRAVE_COST_MICROUSD?: string;
-    TWITTERAPI_IO_KEY?: string;
-    TWITTERAPI_IO_PROXY?: string;
+    X_CLIENT_ID?: string;
+    X_CLIENT_SECRET?: string;
+    X_API_BEARER_TOKEN?: string;
+    X_POST_URL_COST_MICROUSD?: string;
     SERVICE_CREDENTIALS_KEY?: string;
     X_LOGIN_DAILY_LIMIT_MICROUSD?: string;
     X_POST_COST_MICROUSD?: string;

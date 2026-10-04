@@ -1,21 +1,22 @@
 import { env } from 'cloudflare:workers';
 import { db, type CoinRow } from './server';
-import { imageQuote, generateImage, xProvider, ProviderFailure, type ImageQuote } from './content-providers';
+import { imageQuote, generateImage, ProviderFailure, type ImageQuote } from './content-providers';
+import { xProvider, XAccessRevoked } from './x-official';
 import { IMAGE_MODEL, matchingTweet, publicationInput, validatePublication, type Publication } from './content-policy';
-import { xAccount, xConfigured, xCosts, xSession } from './social-config';
+import { xAccount, xConfigured, xCosts, xSession, xConnected, xMediaConfigured, revokeXSession, type XAccount } from './social-config';
 import type { Coin } from './model';
 
-type Job={id:string;coin_id:string;payload:string;status:string;quote:string|null;user_id:string|null;media_id:string|null;tweet_id:string|null;reserved_microusd:number;cost_microusd:number;attempts:number;posting_at:number|null;created_at:number;updated_at:number};
+type Job={x_provider:string;billing:string|null;id:string;coin_id:string;payload:string;status:string;quote:string|null;user_id:string|null;media_id:string|null;tweet_id:string|null;reserved_microusd:number;cost_microusd:number;attempts:number;posting_at:number|null;created_at:number;updated_at:number};
 const unsettled="('queued','reserved','generating','image_ready','uploading','media_ready','posting','uncertain','reconciling')";
-export function contentJobStatement(lease:{coinId:string;id:string},id:string,publication:Publication){const now=Date.now();return db().prepare(`INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at)
- SELECT ?,?,?,'queued',?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)
+export function contentJobStatement(lease:{coinId:string;id:string},id:string,publication:Publication){const now=Date.now();return db().prepare(`INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at,x_provider)
+ SELECT ?,?,?,'queued',?,?,'official' WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)
  AND NOT EXISTS(SELECT 1 FROM content_jobs WHERE coin_id=? AND status IN ${unsettled})
  AND NOT EXISTS(SELECT 1 FROM content_jobs WHERE coin_id=? AND created_at>?)
  AND (SELECT COUNT(*) FROM content_jobs WHERE coin_id=? AND created_at>?)<8
  AND NOT EXISTS(SELECT 1 FROM content_jobs WHERE coin_id=? AND payload=? AND created_at>?)`)
  .bind(id,lease.coinId,JSON.stringify(publication),now,now,lease.coinId,lease.id,now,lease.coinId,lease.coinId,now-3600000,lease.coinId,now-86400000,lease.coinId,JSON.stringify(publication),now-86400000);}
-export async function contentSnapshot(coin:Coin){const [account,jobs]=await Promise.all([xAccount(coin.id),db().prepare('SELECT payload,status,tweet_id,created_at FROM content_jobs WHERE coin_id=? ORDER BY created_at DESC LIMIT 5').bind(coin.id).all<{payload:string;status:string;tweet_id:string|null;created_at:number}>()]);return {xConnected:!!account,xUsername:account?.username??null,recent:jobs.results.map(j=>({publication:JSON.parse(j.payload),status:j.status,tweetId:j.tweet_id,createdAt:j.created_at}))};}
-export async function contentCapabilities(){const value:string[]=[];if(xConfigured())try{if(await xProvider(env.TWITTERAPI_IO_KEY!).balance()>xCosts().post+xCosts().upload+xCosts().read*3)value.push('x-publishing')}catch{}if(env.OPENROUTER_API_KEY)try{await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL);value.push('image-publishing')}catch{}return value;}
+export async function contentSnapshot(coin:Coin){const [account,jobs]=await Promise.all([xAccount(coin.id),db().prepare('SELECT payload,status,tweet_id,created_at FROM content_jobs WHERE coin_id=? ORDER BY created_at DESC LIMIT 5').bind(coin.id).all<{payload:string;status:string;tweet_id:string|null;created_at:number}>()]);return {xConnected:xConnected(account),canPostImages:xMediaConfigured(),xUsername:account?.username??null,recent:jobs.results.map(j=>({publication:JSON.parse(j.payload),status:j.status,tweetId:j.tweet_id,createdAt:j.created_at}))};}
+export async function contentCapabilities(){const value:string[]=[];if(xConfigured())try{if(await xProvider(env.X_API_BEARER_TOKEN!).balance()>xCosts().post+xCosts().upload+xCosts().read*3)value.push('x-publishing')}catch{}if(env.OPENROUTER_API_KEY)try{await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL);value.push('image-publishing')}catch{}return value;}
 async function claim(job:Job,status:string){const version=Math.max(Date.now(),job.updated_at+1);const r=await db().prepare('UPDATE content_jobs SET status=?,updated_at=? WHERE id=? AND status=? AND updated_at=?').bind(status,version,job.id,job.status,job.updated_at).run();if(r.meta.changes){job.status=status;job.updated_at=version;return true}return false;}
 async function finish(job:Job,status:'complete'|'failed',cost:number,message:string,tweetId:string|null=null){
  if(!Number.isSafeInteger(cost)||cost<0||cost>job.reserved_microusd)throw new ProviderFailure();
@@ -30,9 +31,10 @@ async function finish(job:Job,status:'complete'|'failed',cost:number,message:str
  ]);
 }
 async function reserveJob(job:Job,coin:Coin,publication:Publication){
- const account=await xAccount(job.coin_id);validatePublication(publication,{social:coin.social,images:coin.images,connected:!!account});
- const quote=publication.imagePrompt?await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL):null,costs=xCosts();
- if(publication.destination==='x'&&(!xConfigured()||await xProvider(env.TWITTERAPI_IO_KEY!).balance()<costs.post+costs.upload+costs.read*3))return false;
+ const account=await xAccount(job.coin_id);validatePublication(publication,{social:coin.social,images:coin.images,connected:xConnected(account)});
+ const quote=publication.imagePrompt?await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL):null,costs=xCosts(publication.text);
+ if(publication.destination==='x'&&publication.imagePrompt&&!xMediaConfigured())return false;
+ if(publication.destination==='x'&&(!xConfigured()||await xProvider(env.X_API_BEARER_TOKEN!).balance()<costs.post+costs.upload+costs.read*3))return false;
  const ceiling=(quote?.ceiling??0)+(publication.destination==='x'?costs.post+(quote?costs.upload:0)+costs.read*3:0),now=Date.now();
  const result=await db().batch([
   db().prepare(`INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) SELECT ?,id,'content','reserved',?,? FROM coins WHERE id=? AND ai_credit_microusd>=?
@@ -40,7 +42,7 @@ async function reserveJob(job:Job,coin:Coin,publication:Publication){
    AND NOT EXISTS(SELECT 1 FROM agent_runs WHERE coin_id=coins.id AND status='reserved')
    ON CONFLICT(id) DO NOTHING`).bind('content:'+job.id,ceiling,new Date(now).toISOString(),job.coin_id,ceiling,job.id),
   db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd-? WHERE id=? AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved') AND EXISTS(SELECT 1 FROM content_jobs WHERE id=? AND status='queued')").bind(ceiling,job.coin_id,'content:'+job.id,job.id),
-  db().prepare("UPDATE content_jobs SET status='reserved',next_attempt_at=0,quote=?,user_id=?,reserved_microusd=?,updated_at=? WHERE id=? AND status='queued' AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved')").bind(quote?JSON.stringify(quote):null,account?.user_id??null,ceiling,now,job.id,'content:'+job.id),
+  db().prepare("UPDATE content_jobs SET status='reserved',next_attempt_at=0,quote=?,user_id=?,billing=?,reserved_microusd=?,updated_at=? WHERE id=? AND status='queued' AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved')").bind(quote?JSON.stringify(quote):null,account?.user_id??null,JSON.stringify(costs),ceiling,now,job.id,'content:'+job.id),
  ]);return !!result[0].meta.changes;
 }
 export async function runContentTick(){
@@ -48,19 +50,23 @@ export async function runContentTick(){
  // A process may die after sending a write but before persisting its reply.
  // Expiry never resets these states to a sendable stage.
  await db().prepare("UPDATE content_jobs SET attempts=CASE WHEN status='reconciling' THEN 3 ELSE attempts END,status='uncertain',updated_at=? WHERE status IN ('generating','uploading','posting','reconciling') AND updated_at<?").bind(now,now-300000).run();
- const job=await db().prepare(`SELECT * FROM content_jobs WHERE next_attempt_at<=? AND (status IN ('queued','reserved','image_ready','media_ready') OR (status='uncertain' AND posting_at IS NOT NULL AND attempts<3 AND updated_at<?)) ORDER BY next_attempt_at,created_at LIMIT 1`).bind(now,now-60000).first<Job>();
+ const job=await db().prepare(`SELECT * FROM content_jobs WHERE (x_provider='official' OR json_extract(payload,'$.destination')='gallery') AND next_attempt_at<=? AND (status IN ('queued','reserved','image_ready','media_ready') OR (status='uncertain' AND posting_at IS NOT NULL AND attempts<3 AND updated_at<?)) ORDER BY next_attempt_at,created_at LIMIT 1`).bind(now,now-60000).first<Job>();
  if(!job)return {processed:false};
  const turn=await db().prepare('UPDATE content_jobs SET next_attempt_at=? WHERE id=? AND next_attempt_at<=?').bind(now+90000,job.id,now).run();if(!turn.meta.changes)return {processed:false};
  const row=await db().prepare('SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL').bind(job.coin_id).first<CoinRow>();if(!row)return {processed:false};
- const coin=JSON.parse(row.config) as Coin,publication=publicationInput.parse(JSON.parse(job.payload)),costs=xCosts();
+ const coin=JSON.parse(row.config) as Coin,publication=publicationInput.parse(JSON.parse(job.payload)),costs=job.billing?JSON.parse(job.billing) as ReturnType<typeof xCosts>:xCosts(publication.text);
+ let activeXAccount:XAccount|null=null;
  try{
   if(Date.now()-job.created_at>21600000&&['queued','reserved','image_ready','media_ready'].includes(job.status)){await finish(job,'failed',job.cost_microusd,'A community update expired before publication.');return {processed:true};}
   if(job.status==='queued')return {processed:await reserveJob(job,coin,publication)};
   if(job.status==='uncertain'){
-   if(!job.user_id||!await claim(job,'reconciling'))return {processed:false};
+   activeXAccount=await xAccount(job.coin_id);
+   if(!job.user_id||!activeXAccount||activeXAccount.user_id!==job.user_id)return {processed:false};
+   const readSession=await xSession(activeXAccount);
+   if(await xProvider(env.X_API_BEARER_TOKEN!).balance()<costs.read||!await claim(job,'reconciling'))return {processed:false};
    await db().prepare('UPDATE content_jobs SET attempts=attempts+1 WHERE id=?').bind(job.id).run();
-   const tweets=await xProvider(env.TWITTERAPI_IO_KEY!).tweets(job.user_id,job.tweet_id??undefined);
-   const readCost=Math.max(1,tweets.length)*150;
+   const tweets=await xProvider(env.X_API_BEARER_TOKEN!).tweets(readSession,job.user_id,job.tweet_id??undefined);
+   const readCost=tweets.length*5000;
    if(readCost>costs.read)throw new ProviderFailure();
    const cost=job.cost_microusd+readCost;
    const match=matchingTweet(tweets,{userId:job.user_id,text:publication.text,startedAt:job.posting_at!,mediaId:job.media_id});
@@ -82,7 +88,7 @@ export async function runContentTick(){
    if(!['image_ready','media_ready'].includes(job.status))return {processed:false};
    await finish(job,'complete',job.cost_microusd,'Created community artwork.');return {processed:true};
   }
-  const account=await xAccount(job.coin_id);if(!account||account.user_id!==job.user_id)throw new ProviderFailure();const session=await xSession(account),provider=xProvider(env.TWITTERAPI_IO_KEY!);
+  const account=await xAccount(job.coin_id);if(!account||account.user_id!==job.user_id)throw new ProviderFailure();activeXAccount=account;const session=await xSession(account),provider=xProvider(env.X_API_BEARER_TOKEN!);
   if(await provider.balance()<costs.post+(job.status==='image_ready'?costs.upload:0)+costs.read*3)return {processed:false};
   if(job.status==='image_ready'){
    const asset=await db().prepare('SELECT mime,base64 FROM content_assets WHERE id=? AND coin_id=?').bind(job.id,job.coin_id).first<{mime:string;base64:string}>();if(!asset)throw new ProviderFailure();
@@ -101,6 +107,7 @@ export async function runContentTick(){
    await finish(job,'complete',job.cost_microusd+costs.post,'Published on X: https://x.com/i/status/'+tweetId,tweetId);return {processed:true};
   }
  }catch(e){
+  if(e instanceof XAccessRevoked&&activeXAccount)await revokeXSession(activeXAccount);
   const current=await db().prepare('SELECT * FROM content_jobs WHERE id=?').bind(job.id).first<Job>();
   if(current&&['generating','uploading','posting','reconciling'].includes(current.status)){
    if(e instanceof ProviderFailure&&!e.uncertain&&e.cost!==null&&current.status==='generating')await finish(current,'failed',current.cost_microusd+e.cost,'Image generation could not complete. Known service costs were recorded.');

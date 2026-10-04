@@ -80,8 +80,9 @@ export function hasPendingDomainBridge(store,coinId){
 }
 
 export class DomainFunding {
- constructor(store,{bnbClient,baseClient,fetch:request=globalThis.fetch,getOrderId,verifyLaunch},policy){
+ constructor(store,{bnbClient,baseClient,fetch:request=globalThis.fetch,getOrderId,verifyLaunch,protocolReserve=async()=>0n},policy){
   this.store=store;this.bnb=bnbClient;this.base=baseClient;this.fetch=request;this.getOrderId=getOrderId;this.verifyLaunch=verifyLaunch;this.policy=policy;
+  this.protocolReserve=protocolReserve;
   requireThat(typeof getOrderId==='function'&&typeof verifyLaunch==='function','Funding validators are required');
   this.store.db.exec(`CREATE TABLE IF NOT EXISTS domain_funding_jobs(id TEXT PRIMARY KEY,coin_id TEXT NOT NULL REFERENCES wallets(coin_id),request TEXT NOT NULL,status TEXT NOT NULL,record TEXT NOT NULL,version INTEGER NOT NULL,nonce INTEGER,created_at INTEGER NOT NULL);
    CREATE UNIQUE INDEX IF NOT EXISTS domain_funding_pending_coin ON domain_funding_jobs(coin_id) WHERE status NOT IN ('complete','failed');
@@ -156,7 +157,7 @@ export class DomainFunding {
     requireThat(nonce===latest&&Number.isSafeInteger(nonce),'Untracked pending BNB nonce');const gas=estimate*120n/100n;
     requireThat(gasPrice>0n&&gasPrice<=BigInt(this.policy.maxGasPriceWei)&&gas>0n&&gas<=200000n,'Bridge gas exceeds policy');
     requireThat(transaction.value+gas*gasPrice<=uint(input.maxBnbWei),'Bridge amount plus maximum gas exceeds the authorized BNB budget');
-    requireThat((balance<confirmed?balance:confirmed)>=transaction.value+gas*gasPrice+BigInt(this.policy.gasReserveWei),'Insufficient confirmed BNB for bridge and gas reserve');
+    requireThat((balance<confirmed?balance:confirmed)>=transaction.value+gas*gasPrice+BigInt(this.policy.gasReserveWei)+await this.protocolReserve(wallet),'Insufficient confirmed BNB for bridge, gas and protocol reserves');
     const expected={...transaction,nonce,gas,gasPrice,chainId:56,type:'legacy'};
     const raw=await this.store.account(row.coin_id).signTransaction(expected),parsed=parseTransaction(raw),sender=await recoverTransactionAddress({serializedTransaction:raw});
     requireThat(same(sender,wallet.address)&&parsed.chainId===56&&parsed.type==='legacy'&&same(parsed.to,transaction.to)&&parsed.value===transaction.value&&parsed.data===transaction.data&&parsed.nonce===nonce&&parsed.gas===gas&&parsed.gasPrice===gasPrice,'Signed bridge differs from approved transaction');

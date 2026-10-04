@@ -38,4 +38,4 @@ CMD ["node","index.mjs"]
 
 FROM nginx:1.28-alpine AS gateway
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+EXPOSE 3187

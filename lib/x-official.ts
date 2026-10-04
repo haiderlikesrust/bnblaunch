@@ -1,0 +1,62 @@
+type XReadPost={id:string;text:string;created_at:string;author_id:string;referenced_tweets?:{type:string}[];entities?:{urls?:{url:string;expanded_url:string;media_key?:string}[]};attachments?:{media_keys?:string[]}};
+import { ProviderFailure } from './content-providers.ts';
+
+export const X_SCOPES = ['tweet.read', 'tweet.write', 'users.read', 'media.write', 'offline.access'];
+export type XTokens = { accessToken: string; refreshToken: string; expiresAt: number; scopes: string[] };
+export class XAccessRevoked extends ProviderFailure { constructor() { super(false, null); } }
+export async function xRequest(token: string, path: string, init: RequestInit = {}, transport: typeof fetch = fetch) {
+  let response: Response;
+  try { response = await transport('https://api.x.com' + path, { ...init, headers: { ...init.headers, Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(45000) }); }
+  catch { throw new ProviderFailure(); }
+  if (response.status === 401) throw new XAccessRevoked();
+  if (!response.ok) throw new ProviderFailure();
+  try { return await response.json(); } catch { throw new ProviderFailure(); }
+}
+export async function exchangeXToken(clientId: string, clientSecret: string, params: Record<string, string>, transport: typeof fetch = fetch): Promise<XTokens> {
+  let response: Response;
+  try {
+    response = await transport('https://api.x.com/2/oauth2/token', { method: 'POST', headers: { Authorization: 'Basic ' + btoa(encodeURIComponent(clientId) + ':' + encodeURIComponent(clientSecret)), 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ ...params, client_id: clientId }), redirect: 'error', signal: AbortSignal.timeout(20000) });
+  } catch { throw new XAccessRevoked(); }
+  if (!response.ok) throw new XAccessRevoked();
+  const value = await response.json() as {scope?:string;token_type?:string;access_token?:string;refresh_token?:string;expires_in:number};
+  const scopes = typeof value.scope === 'string' ? value.scope.split(' ') : [];
+  if (value.token_type?.toLowerCase() !== 'bearer' || typeof value.access_token !== 'string' || !value.access_token || typeof value.refresh_token !== 'string' || !value.refresh_token || !Number.isSafeInteger(value.expires_in) || value.expires_in < 60 || !X_SCOPES.every(s => scopes.includes(s))) throw new XAccessRevoked();
+  return { accessToken: value.access_token, refreshToken: value.refresh_token, expiresAt: Date.now() + value.expires_in * 1000, scopes };
+}
+export function xProvider(billingToken: string, transport: typeof fetch = fetch) {
+  return {
+    async balance() {
+      if (!billingToken) throw new ProviderFailure(false, 0);
+      const value = await xRequest(billingToken, '/2/usage/credits', {}, transport) as {data?:{total_balance?:number}}, balance = value.data?.total_balance;
+      if (typeof balance !== 'number' || !Number.isFinite(balance) || balance < 0 || !Number.isSafeInteger(Math.floor(balance * 1e6))) throw new ProviderFailure();
+      return Math.floor(balance * 1e6);
+    },
+    async me(accessToken: string) {
+      const value = await xRequest(accessToken, '/2/users/me', {}, transport) as {data?:{id:string;username:string}}, user = value.data;
+      if (typeof user?.id !== 'string' || !/^\d+$/.test(user.id) || !/^[A-Za-z0-9_]{1,15}$/.test(user.username)) throw new ProviderFailure();
+      return { id: user.id as string, username: user.username as string };
+    },
+    async upload(session: { accessToken: string }, file: File) {
+      const form = new FormData(); form.append('media', file); form.append('media_category', 'tweet_image');
+      const result = await xRequest(session.accessToken, '/2/media/upload', { method: 'POST', body: form }, transport) as {data?:{id:string;processing_info?:{state:string}}}, media = result.data;
+      if (typeof media?.id !== 'string' || !/^\d+$/.test(media.id) || (media.processing_info && media.processing_info.state !== 'succeeded')) throw new ProviderFailure();
+      return media.id as string;
+    },
+    async post(session: { accessToken: string }, text: string, mediaId?: string | null) {
+      const result = await xRequest(session.accessToken, '/2/tweets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, ...(mediaId ? { media: { media_ids: [mediaId] } } : {}) }) }, transport) as {data?:{id:string}};
+      if (typeof result.data?.id !== 'string' || !/^\d+$/.test(result.data.id)) throw new ProviderFailure();
+      return result.data.id as string;
+    },
+    async tweets(session: { accessToken: string }, userId: string, id?: string) {
+      if (!/^\d+$/.test(userId) || (id && !/^\d+$/.test(id))) throw new ProviderFailure();
+      const params = new URLSearchParams({ 'tweet.fields': 'author_id,created_at,attachments,entities,referenced_tweets' });
+      if (!id) { params.set('max_results', '10'); params.set('exclude', 'retweets,replies'); }
+      const result = await xRequest(session.accessToken, (id ? '/2/tweets/' + id : '/2/users/' + userId + '/tweets') + '?' + params, {}, transport) as {errors?:unknown[];data?:XReadPost|XReadPost[]};
+      if (result.errors?.length) throw new ProviderFailure();
+      const tweets = id ? [result.data] : result.data ?? [];
+      if (!Array.isArray(tweets) || tweets.length > 10) throw new ProviderFailure();
+      if(tweets.some(v=>!v||Array.isArray(v)||typeof v.id!=="string"||typeof v.text!=="string"))throw new ProviderFailure();
+      return (tweets as XReadPost[]).map(v => ({ id: v.id, text: v.text, createdAt: v.created_at, author: { id: v.author_id }, isReply: v.referenced_tweets?.some((r: { type: string }) => r.type === 'replied_to'), isRetweet: v.referenced_tweets?.some((r: { type: string }) => r.type === 'retweeted'), quoted_tweet: v.referenced_tweets?.some((r: { type: string }) => r.type === 'quoted') || undefined, entities: { urls: v.entities?.urls?.map((u: { url: string; expanded_url: string }) => ({ url: u.url, expanded_url: u.expanded_url })) }, extendedEntities: { media: v.attachments?.media_keys?.map((key: string) => ({ id_str: key.split('_').slice(1).join('_'), url: v.entities?.urls?.find((u: { media_key?: string }) => u.media_key === key)?.url })) } }));
+    },
+  };
+}
