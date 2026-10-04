@@ -84,8 +84,25 @@ export class Campaigns{
  addLeg(c,position,kind,amount,recipient=null,gas=null){
   this.store.db.prepare('INSERT INTO campaign_legs(id,campaign_id,position,kind,amount_wei,recipient,gas_limit_wei,expires_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(campaign_id,position) DO NOTHING').run(randomUUID(),c.id,position,kind,amount,recipient,gas,0);
  }
+ async verifiedReceipt(id){
+  return this.engine.confirmedReceipt(id);
+ }
+ async recoverExpiredBurn(c){
+  // Recover only a burn that never acquired signed bytes. A reverted or
+  // ambiguous transfer remains a reconciliation issue, never a new attempt.
+  const [buy,burn]=this.legs(c.id),intent=burn&&this.store.intent(burn.id);
+  if(c.status!=='partial'||c.kind==='rewards'||buy?.status!=='confirmed'||burn?.kind!=='burn'||burn.status!=='expired'||burn.tx_hash||intent?.tx_hash||intent?.raw_tx)return false;
+  const receipt=await this.verifiedReceipt(buy.id),wallet=this.store.wallet(c.coin_id),token=this.engine.transactionToken(this.store.intent(buy.id),wallet),record=JSON.parse(c.record);
+  if(netReceived(receipt.logs,token,wallet.address).toString()!==record.boughtTokenWei||burn.amount_wei!==record.boughtTokenWei)throw Error('Expired burn amount does not match confirmed purchase');
+  const fence=this.store.acquire(c.coin_id);
+  try{
+   if(pendingCampaign(this.store,c.coin_id)||this.store.pending(c.coin_id)||hasPendingDomainBridge(this.store,c.coin_id))return false;
+   record.stage='burn';delete record.reason;
+   return !!this.store.db.prepare("UPDATE campaigns SET status='running',record=? WHERE id=? AND status='partial'").run(JSON.stringify(record),c.id).changes;
+  }finally{this.store.release(c.coin_id,fence);}
+ }
  async tick(id){
-  let c=this.row(id);if(!c)throw Error('Campaign not found');if(terminal(c.status))return this.status(id);
+  let c=this.row(id);if(!c)throw Error('Campaign not found');if(terminal(c.status)){if(!await this.recoverExpiredBurn(c))return this.status(id);c=this.row(id);}
   const lease=randomUUID();if(!this.store.db.prepare('UPDATE campaigns SET lease=?,lease_until=? WHERE id=? AND lease_until<?').run(lease,Date.now()+120000,id,Date.now()).changes)throw Error('Campaign is busy');
   const r=JSON.parse(c.record),wallet=this.store.wallet(c.coin_id),token=c.kind==='shen_buyback_burn'?r.targetToken:wallet.token_address;
   const save=(status='running')=>{if(!this.store.db.prepare('UPDATE campaigns SET status=?,record=? WHERE id=? AND lease=? AND lease_until>?').run(status,JSON.stringify(r),id,lease,Date.now()).changes)throw Error('Campaign lease expired');};
@@ -143,11 +160,29 @@ export class Campaigns{
     }
    }
    if(c.kind!=='rewards'&&r.stage==='buy'&&!this.legs(id).length)this.addLeg(c,0,'buyback',c.amount_wei);
-   const legs=this.legs(id),leg=legs.find(l=>!['confirmed','reverted','expired'].includes(l.status));
+   const legs=this.legs(id),completionBurn=c.kind!=='rewards'&&r.stage==='burn';
+   if(completionBurn){
+    const receipt=await this.verifiedReceipt(legs[0].id);
+    if(netReceived(receipt.logs,token,wallet.address).toString()!==r.boughtTokenWei||legs[1]?.amount_wei!==r.boughtTokenWei)throw Error('Burn amount does not match confirmed purchase');
+    const burn=legs[1],intent=this.store.intent(burn.id);
+    if(burn.expires_at>0&&burn.expires_at<=Date.now()&&!burn.tx_hash&&!intent?.tx_hash&&!intent?.raw_tx&&(!intent||['created','expired'].includes(intent.status))){
+     const fence=this.store.acquire(c.coin_id),expires=Date.now()+300000;
+     try{
+      this.store.db.exec('BEGIN IMMEDIATE');
+      try{
+       if(!this.store.db.prepare('SELECT 1 FROM campaigns WHERE id=? AND lease=? AND lease_until>?').get(id,lease,Date.now()))throw Error('Campaign lease expired');
+       this.store.db.prepare("UPDATE intents SET status='created',expires_at=? WHERE id=? AND status IN ('created','expired') AND tx_hash IS NULL AND raw_tx IS NULL").run(expires,burn.id);
+       this.store.db.prepare("UPDATE campaign_legs SET status='queued',expires_at=? WHERE id=? AND tx_hash IS NULL").run(expires,burn.id);
+       this.store.db.exec('COMMIT');burn.status='queued';burn.expires_at=expires;
+      }catch(e){this.store.db.exec('ROLLBACK');throw e;}
+     }finally{this.store.release(c.coin_id,fence);}
+    }
+   }
+   const leg=legs.find(l=>!['confirmed','reverted','expired'].includes(l.status));
    if(leg){
     let intent=this.store.intent(leg.id);
     if(intent?.tx_hash){await this.engine.reconcile(leg.id);intent=this.store.intent(leg.id);}
-    else if((leg.expires_at>0&&Date.now()>leg.expires_at)||Date.now()>r.deadline){
+    else if((leg.expires_at>0&&Date.now()>leg.expires_at)||(!completionBurn&&Date.now()>r.deadline)){
      this.store.expireUnsigned(leg.id);this.store.db.prepare("UPDATE campaign_legs SET status='expired' WHERE id=?").run(leg.id);return this.status(id);
     }else{if(!leg.expires_at){leg.expires_at=Date.now()+300000;this.store.db.prepare('UPDATE campaign_legs SET expires_at=? WHERE id=? AND expires_at=0').run(leg.expires_at,leg.id);}
      await this.engine.execute({id:leg.id,coinId:c.coin_id,kind:leg.kind,amountWei:leg.amount_wei,expiresAt:leg.expires_at});intent=this.store.intent(leg.id);}
@@ -156,15 +191,14 @@ export class Campaigns{
    }
    if(c.kind!=='rewards'){
     const buy=legs[0];if(buy?.status!=='confirmed'){r.reason='Buy did not confirm; no burn was attempted';save('failed');return this.status(id);}
-    await this.engine.reconcile(buy.id);
     if(r.stage==='buy'){
-     const receipt=await this.client.getTransactionReceipt({hash:buy.tx_hash}),received=netReceived(receipt.logs,token,wallet.address);
+     const receipt=await this.verifiedReceipt(buy.id),received=netReceived(receipt.logs,token,wallet.address);
      if(received<=0n)throw Error('Buy receipt has no verified tokens received');
      r.boughtTokenWei=received.toString();r.stage='burn';
      this.store.db.exec('BEGIN IMMEDIATE');try{this.addLeg(c,1,'burn',received.toString());save();this.store.db.exec('COMMIT');}catch(e){this.store.db.exec('ROLLBACK');throw e;}return this.status(id);
     }
     const burn=legs[1];if(burn?.status==='confirmed'){
-     await this.engine.reconcile(burn.id);const receipt=await this.client.getTransactionReceipt({hash:burn.tx_hash});r.burnedTokenWei=netReceived(receipt.logs,token,DEAD).toString();
+     const receipt=await this.verifiedReceipt(burn.id);r.burnedTokenWei=netReceived(receipt.logs,token,DEAD).toString();
      if(r.burnedTokenWei!==r.boughtTokenWei)throw Error('Burn receipt amount mismatch');
     }
    }

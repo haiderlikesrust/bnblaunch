@@ -95,3 +95,59 @@ test('incomplete holder history does not commit a partially mutated ledger',asyn
 test('a budget too small for reward gas fails without locking the wallet indefinitely',async()=>{
  const f=fixture();try{f.engine.policy.maxGasPriceWei=1000n;await f.campaigns.tick(f.input.id);await f.campaigns.tick(f.input.id);const result=await f.campaigns.tick(f.input.id);assert.equal(result.status,'failed');assert.equal(f.raws.length,0);}finally{f.store.close();}
 });
+
+test('an expired unsigned burn resumes the same leg after the buy instead of stranding tokens',async()=>{
+ const f=fixture('buyback_burn');try{
+  for(let i=0;i<10&&f.campaigns.status(f.input.id).stage!=='burn';i++)await f.campaigns.tick(f.input.id);
+  const burn=f.campaigns.legs(f.input.id)[1];assert.ok(burn);
+  f.store.createIntent({id:burn.id,coinId:f.input.coinId,kind:'burn',amountWei:burn.amount_wei,expiresAt:Date.now()+60000});
+  f.store.db.prepare("UPDATE intents SET expires_at=1,status='expired' WHERE id=?").run(burn.id);
+  f.store.db.prepare("UPDATE campaign_legs SET expires_at=1,status='expired' WHERE id=?").run(burn.id);
+  const record=JSON.parse(f.campaigns.row(f.input.id).record);record.deadline=1;
+  f.store.db.prepare('UPDATE campaigns SET record=? WHERE id=?').run(JSON.stringify(record),f.input.id);
+  const result=await finish(f);assert.equal(result.status,'complete');assert.equal(result.burnedTokenWei,'500');
+  assert.equal(f.campaigns.legs(f.input.id)[1].id,burn.id);assert.equal(f.raws.length,2,'one buy and one burn only');
+ }finally{f.store.close()}
+});
+
+test('a changed second receipt cannot authorize a burn amount from unverified logs',async()=>{
+ const f=fixture('buyback_burn');try{
+  for(let i=0;i<3;i++)await f.campaigns.tick(f.input.id);
+  assert.equal(f.campaigns.legs(f.input.id)[0].status,'confirmed');
+  const original=f.client.getTransactionReceipt;let reads=0;
+  f.client.getTransactionReceipt=async args=>{const receipt=await original(args);if(args.hash!==launch&&++reads===2)return {...receipt,blockHash:'0x'+'f'.repeat(64),logs:[log(PORTAL,f.wallet.address,499n)]};return receipt};
+  await assert.rejects(f.campaigns.tick(f.input.id),/receipt|canonical|reorganiz/i);
+  assert.equal(f.campaigns.legs(f.input.id).length,1,'no burn leg authorized from changed receipt');
+  assert.equal(f.raws.length,1);
+ }finally{f.store.close()}
+});
+
+test('previously partial campaigns recover only expired burns with no signed transaction',async()=>{
+ const f=fixture('buyback_burn');try{
+  for(let i=0;i<10&&f.campaigns.status(f.input.id).stage!=='burn';i++)await f.campaigns.tick(f.input.id);
+  const burn=f.campaigns.legs(f.input.id)[1],record=JSON.parse(f.campaigns.row(f.input.id).record);
+  record.stage='finished';record.deadline=1;
+  f.store.db.prepare("UPDATE campaigns SET status='partial',record=? WHERE id=?").run(JSON.stringify(record),f.input.id);
+  f.store.db.prepare("UPDATE campaign_legs SET status='expired',expires_at=1 WHERE id=?").run(burn.id);
+  const restarted=new Campaigns(f.store,f.engine);f.campaigns=restarted;
+  assert.equal((await finish(f)).status,'complete');assert.equal(f.raws.length,2);assert.equal(f.campaigns.legs(f.input.id)[1].id,burn.id);
+ }finally{f.store.close()}
+ const ambiguous=fixture('buyback_burn');try{
+  for(let i=0;i<10&&ambiguous.campaigns.status(ambiguous.input.id).stage!=='burn';i++)await ambiguous.campaigns.tick(ambiguous.input.id);
+  await ambiguous.campaigns.tick(ambiguous.input.id);
+  const burn=ambiguous.campaigns.legs(ambiguous.input.id)[1];assert.ok(ambiguous.store.intent(burn.id).tx_hash);
+  ambiguous.store.db.prepare("UPDATE campaigns SET status='partial' WHERE id=?").run(ambiguous.input.id);
+  ambiguous.store.db.prepare("UPDATE campaign_legs SET status='expired' WHERE id=?").run(burn.id);
+  assert.equal(await ambiguous.campaigns.recoverExpiredBurn(ambiguous.campaigns.row(ambiguous.input.id)),false);
+  assert.equal(ambiguous.raws.length,2,'signed burns are reconciled, never reset');
+ }finally{ambiguous.store.close()}
+});
+
+test('a confirmed reverted burn remains partial and is not silently retried',async()=>{
+ const f=fixture('buyback_burn');try{
+  for(let i=0;i<10&&f.campaigns.status(f.input.id).stage!=='burn';i++)await f.campaigns.tick(f.input.id);
+  await f.campaigns.tick(f.input.id);
+  const burn=f.campaigns.legs(f.input.id)[1];f.receipts.set(burn.tx_hash,{...f.receipts.get(burn.tx_hash),status:'reverted',logs:[]});
+  assert.equal((await finish(f)).status,'partial');assert.equal((await f.campaigns.tick(f.input.id)).status,'partial');assert.equal(f.raws.length,2);
+ }finally{f.store.close()}
+});

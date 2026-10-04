@@ -78,7 +78,8 @@ export class ProtocolFees{
    return {processed:true,campaign:await this.campaigns.tick(pending.id)};
   }
   const fees=await this.quote(wallet),amount=BigInt(fees.reserveWei);
-  const unfinishedBurn=this.store.db.prepare("SELECT record FROM campaigns WHERE coin_id=? AND kind='shen_buyback_burn' AND status IN ('partial','failed')").all(wallet.coin_id).some(c=>{const r=JSON.parse(c.record);return r.boughtTokenWei&&r.boughtTokenWei!==r.burnedTokenWei;});
+  const unfinishedBurn=this.store.db.prepare("SELECT * FROM campaigns WHERE coin_id=? AND kind='shen_buyback_burn' AND status IN ('partial','failed')").all(wallet.coin_id).find(c=>{const r=JSON.parse(c.record);return r.boughtTokenWei&&r.boughtTokenWei!==r.burnedTokenWei;});
+  if(unfinishedBurn&&!pending&&!this.store.pending(wallet.coin_id)&&!hasPendingDomainBridge(this.store,wallet.coin_id)&&await this.campaigns.recoverExpiredBurn(unfinishedBurn))return {processed:true,campaign:await this.campaigns.tick(unfinishedBurn.id)};
   if(unfinishedBurn)return {processed:false,reason:'burn_reconciliation_required'};
   if(pending||this.store.pending(wallet.coin_id)||hasPendingDomainBridge(this.store,wallet.coin_id)||!this.engine.policy.shenTokenAddress||!this.engine.policy.buybacksEnabled||amount<10000000000000000n)return {processed:false};
   // 0.01 BNB is a batching minimum, not a deduction: smaller allocations remain reserved.

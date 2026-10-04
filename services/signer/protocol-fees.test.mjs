@@ -68,3 +68,14 @@ test('unconfigured SHEN and small batches retain the full allocation without buy
   f.engine.policy.shenTokenAddress=shen;f.engine.policy.buybacksEnabled=false;assert.equal((await f.fees.tick()).processed,false);
  }finally{f.store.close()}
 });
+
+test('protocol batching waits below the minimum, starts at the boundary and preserves the remainder',async()=>{
+ const f=fixture();try{
+  f.state.total=66666666666666666n;
+  assert.equal((await f.fees.tick()).processed,false);
+  assert.equal((await f.fees.quote(f.wallet)).reserveWei,'9999999999999999');
+  f.state.total++;
+  const result=await f.fees.tick();assert.equal(result.campaign.amountWei,'10000000000000000');
+  assert.equal((await f.fees.quote(f.wallet)).reserveWei,'10000000000000000','queuing is not spending');
+ }finally{f.store.close()}
+});

@@ -71,6 +71,13 @@ export class SigningEngine {
       return {to:leg.recipient,value:amount,data:'0x'};
     }
     if(row.kind==='burn') {
+      const leg=row.id?campaignLeg(this.store,row.id):null;
+      if(leg){
+        const buy=this.store.db.prepare("SELECT id FROM campaign_legs WHERE campaign_id=? AND position=0 AND kind='buyback' AND status='confirmed'").get(leg.campaign_id);
+        if(!buy)throw Error('Burn requires a confirmed campaign purchase');
+        const receipt=await this.confirmedReceipt(buy.id);
+        if(netReceived(receipt.logs,token,wallet.address)!==amount||JSON.parse(leg.campaign_record).boughtTokenWei!==row.amount_wei)throw Error('Burn authority does not match the confirmed purchase');
+      }
       const balance=await this.client.readContract({address:token,abi:erc20,functionName:'balanceOf',args:[wallet.address]});
       if(amount>balance) throw Error('Insufficient token balance');
       return {to:token,value:0n,data:encodeFunctionData({abi:erc20,functionName:'transfer',args:[DEAD,amount]})};
@@ -109,13 +116,24 @@ export class SigningEngine {
     const limit=BigInt(this.policy.maxPriceImpactBps??300);
     if(quote<=0n||probeQuote<=0n||quote*probeAmount*10000n<probeQuote*amount*(10000n-limit))throw Error('Buy exceeds price-impact policy');
   }
+  async confirmedReceipt(id){
+    await this.reconcile(id);
+    const intent=this.store.intent(id);
+    if(intent?.status!=='confirmed'||!intent.receipt_hash)throw Error('Campaign receipt is not confirmed');
+    const receipt=await this.client.getTransactionReceipt({hash:intent.tx_hash});
+    const [head,block]=await Promise.all([this.chainReady(),this.client.getBlock({blockNumber:receipt.blockNumber})]);
+    if(receipt.status!=='success'||head.number-receipt.blockNumber<3n||receipt.blockHash!==block.hash||receipt.blockHash!==intent.receipt_hash||receipt.blockNumber.toString()!==intent.receipt_block)throw Error('Campaign receipt changed; reconciliation required');
+    return receipt;
+  }
   async execute(input) {
     const row=this.store.createIntent(input),fence=this.store.acquire(row.coin_id);
     try {
       if(row.status!=='created') return await this.reconcile(row.id);
       const campaign=pendingCampaign(this.store,row.coin_id),leg=campaignLeg(this.store,row.id);
       if(campaign&&(!leg||leg.campaign_id!==campaign.id))throw Error('Treasury campaign is pending');
-      if(leg&&Date.now()>JSON.parse(leg.campaign_record).deadline)throw Error('Campaign authority expired');
+      const campaignRecord=leg?JSON.parse(leg.campaign_record):null;
+      const completingBurn=leg?.kind==='burn'&&['buyback_burn','shen_buyback_burn'].includes(leg.campaign_kind)&&campaignRecord.stage==='burn'&&campaignRecord.boughtTokenWei===row.amount_wei;
+      if(leg&&Date.now()>campaignRecord.deadline&&!completingBurn)throw Error('Campaign authority expired');
       if(leg&&(!campaign||leg.coin_id!==row.coin_id||leg.kind!==row.kind||leg.amount_wei!==row.amount_wei||leg.expires_at!==row.expires_at||leg.campaign_status!=='running'))throw Error('Campaign leg authorization mismatch');
       if(hasPendingDomainBridge(this.store,row.coin_id)) throw Error('Domain funding is pending for this wallet');
       if(row.expires_at<=Date.now()) throw Error('Unsigned intent expired');
