@@ -89,3 +89,17 @@ test('public platform configuration publishes only a valid contract and the offi
   assert.deepEqual(await platformGET().json(),{shenTokenAddress:env.SHEN_TOKEN_ADDRESS,xUrl:'https://x.com/shendotnow'});
  }finally{delete env.SHEN_TOKEN_ADDRESS;delete env.OPENROUTER_API_KEY;}
 });
+
+test('routine checks preserve a rejected plan outcome and expose the separate planning schedule',async()=>{
+ const sql=fixture(),now=Date.now(),started=new Date(now-60000).toISOString();
+ try{
+  sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...coin,tokenAddress:'0x1'}));
+  sql.prepare("INSERT INTO runtime_health(id,checked_at,capabilities,version) VALUES('worker',?,?,'1')").run(now,JSON.stringify(['autonomous-planning']));
+  sql.prepare("INSERT INTO runtime_leases(coin_id,lease_until,next_run_at,next_plan_at,last_checked_at,last_reason) VALUES('coin',0,?,?,?,'awaiting_next_plan')").run(now+60000,now+840000,now);
+  sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at,finished_at,output) VALUES('attempt','coin','plan','settled',100,?,?,?)").run(started,new Date(now-45000).toISOString(),'private rejected output');
+  const get=async()=>await (await consoleGET(new Request('https://shen.now'),{params:Promise.resolve({id:'coin'})})).json();
+  const rejected=await get();assert.equal(rejected.state,'planning_retry_scheduled');assert.equal(rejected.nextCheckAt,now+60000);assert.equal(rejected.nextPlanAt,now+840000);assert.equal(rejected.lastPlan.outcome,'not_approved');assert.equal(JSON.stringify(rejected).includes('private'),false);
+  sql.prepare("INSERT INTO agent_memories VALUES('attempt','coin','private summary','private next steps',?)").run(now);
+  const approved=await get();assert.equal(approved.state,'scheduled');assert.equal(approved.lastPlan.outcome,'approved');assert.equal(JSON.stringify(approved).includes('private'),false);
+ }finally{sql.close();}
+});

@@ -4,11 +4,11 @@ export async function agentConsole(coin: Coin) {
   const now = Date.now();
   const [research, run, content, operation, domain, lease, health, events, memory] = await Promise.all([
     db().prepare('SELECT status,started_at,finished_at FROM research_runs WHERE coin_id=? ORDER BY started_at DESC LIMIT 1').bind(coin.id).first<{ status: string; started_at: number; finished_at: number | null }>(),
-    db().prepare("SELECT status,created_at FROM agent_runs WHERE coin_id=? AND kind='plan' ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; created_at: string }>(),
+    db().prepare("SELECT status,created_at,finished_at,EXISTS(SELECT 1 FROM agent_memories WHERE agent_memories.id=agent_runs.id AND agent_memories.coin_id=agent_runs.coin_id) AS approved FROM agent_runs WHERE coin_id=? AND kind='plan' ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; created_at: string;finished_at:string|null;approved:boolean|number }>(),
     db().prepare("SELECT status,updated_at FROM content_jobs WHERE coin_id=? AND status NOT IN ('complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
     db().prepare("SELECT kind,status,created_at FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ kind: string; status: string; created_at: number }>(),
     db().prepare("SELECT status,updated_at FROM domain_orders WHERE coin_id=? AND status NOT IN ('live','complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
-    db().prepare('SELECT lease_until,next_run_at,last_checked_at,last_reason FROM runtime_leases WHERE coin_id=?').bind(coin.id).first<{ lease_until: number; next_run_at: number;last_checked_at:number|null;last_reason:string|null }>(),
+    db().prepare('SELECT lease_until,next_run_at,next_plan_at,last_checked_at,last_reason FROM runtime_leases WHERE coin_id=?').bind(coin.id).first<{ lease_until: number; next_run_at: number;next_plan_at:number;last_checked_at:number|null;last_reason:string|null }>(),
     db().prepare("SELECT checked_at,capabilities FROM runtime_health WHERE id='worker'").first<{ checked_at: number;capabilities:string }>(),
     db().prepare('SELECT id,message,created_at FROM events WHERE coin_id=? ORDER BY created_at DESC LIMIT 8').bind(coin.id).all<{ id: string; message: string; created_at: string }>(),
     db().prepare('SELECT COUNT(*) AS entries,MAX(created_at) AS updated FROM agent_memories WHERE coin_id=?').bind(coin.id).first<{ entries: number; updated: number | null }>(),
@@ -30,6 +30,8 @@ export async function agentConsole(coin: Coin) {
     state=states[lease.last_reason]??'checking';changedAt=lease.last_checked_at;
   }
   else state='check_unconfirmed';
-  return { state, changedAt, observedAt: now,lastCheckAt:lease?.last_checked_at??null, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,
+  if(state==='scheduled'&&run?.status==='settled'&&!run.approved)state='planning_retry_scheduled';
+  const lastPlan=run?{outcome:run.approved?'approved':run.status==='reserved'?'pending':'not_approved',startedAt:Date.parse(run.created_at),finishedAt:run.finished_at?Date.parse(run.finished_at):null}:null;
+  return { state, changedAt, observedAt: now,lastCheckAt:lease?.last_checked_at??null, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,nextPlanAt:lease?.next_plan_at&&lease.next_plan_at>now?lease.next_plan_at:null,lastPlan,
     memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
 }
