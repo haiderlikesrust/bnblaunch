@@ -31,7 +31,9 @@ async function cycle(){
     try{
       // The immutable operation ID is reused after every timeout or restart.
       // Signer persistence determines whether to sign, replay or reconcile.
-      if(['rewards','buyback_burn'].includes(op.kind)){
+      if(op.kind==='compute'&&op.status==='awaiting_credit'){
+        // Its transfer is already confirmed. Only reconcile its internal service credit.
+      }else if(['rewards','buyback_burn'].includes(op.kind)){
         const {campaign}=await request(signer,`/v1/campaigns/${op.id}/record`,env.SIGNER_WORKER_TOKEN);
         if(campaign||op.expiresAt>Date.now()){
           if(!campaign)await request(signer,'/v1/campaigns',env.SIGNER_WORKER_TOKEN,{id:op.id,coinId:op.coinId,kind:op.kind,amountWei:op.amountWei,expiresAt:op.expiresAt});

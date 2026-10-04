@@ -8,7 +8,7 @@ import { createDatabase, migratePostgres } from '../server/postgres.mjs';
 import { resolve } from 'node:path';
 register('./planner-loader.mjs',import.meta.url);
 const env=globalThis.__shenTestEnv={OPENROUTER_API_KEY:'test',OPENROUTER_MANAGEMENT_KEY:'test',SIGNER_URL:'https://signer.test',SIGNER_WEB_TOKEN:'test-only-'.repeat(6)};
-const {runAgentTick}=await import('../lib/runtime.ts');
+const {runAgentTick,runtimeCapabilities}=await import('../lib/runtime.ts');
 const {publishedWebsite}=await import('../lib/websites.ts');
 const {agentPlan}=await import('../lib/runtime-policy.ts');
 const {boundedPlanningContext,contextBytes}=await import('../lib/planning-context.ts');
@@ -60,18 +60,18 @@ function fixture(){
  sql.prepare('INSERT INTO coins(id,owner,config,token_address,treasury_address,created_at,updated_at,ai_credit_microusd) VALUES(?,?,?,?,?,?,?,?)').run('coin','owner',JSON.stringify(coin),token,wallet,new Date(now).toISOString(),new Date(now).toISOString(),1000000);
  globalThis.__plannerChain={getChainId:async()=>56,getBlock:async()=>({number:100n,hash:'0x'+'a'.repeat(64),timestamp:BigInt(Math.floor(Date.now()/1000))}),readContract:async({functionName})=>{
   const values={balanceOf:0n,taxProcessor:processor,taxToken:token,marketAddress:wallet,weth:'0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',feeConfigV2:{isWeth:true,marketBps:10000,lpBps:0,dividendBps:0,deflationBps:0},totalQuoteSentToMarketing:1000000n,marketQuoteBalance:5n,decimals:8,latestRoundData:[1n,60000000000n,0n,BigInt(Math.floor(Date.now()/1000)),1n]};if(!(functionName in values))throw Error(functionName);return values[functionName];}};
- let walletResult={protocolReserveWei:"0",feeAccountingReady:true},expiry=false,reject=false,fail=false,output=plan,modifyReply=(reply)=>reply;const calls=[];
+ let providerCredits=100000;let walletResult={protocolReserveWei:"0",feeAccountingReady:true},expiry=false,reject=false,fail=false,output=plan,modifyReply=(reply)=>reply;const calls=[];
  const json=v=>new Response(JSON.stringify(v));
  globalThis.fetch=async(url,init={})=>{const u=String(url);
   if(u.endsWith('/balance'))return json({address:wallet,tokenAddress:token,balanceWei:'1000000000000000000',observedAt:now,block:'100',...walletResult});
   if(u.endsWith('/v1/status'))return json({chainId:56,signingReady:true,settlementAddress:wallet,gasReserveWei:'2000000000000000',buybacksEnabled:false});
   if(u.endsWith('/v1/models'))return json({data:[...new Set([DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL])].map(id=>({id,pricing:{prompt:'0.000001',completion:'0.000001'},supported_parameters:['response_format','reasoning'],reasoning:{supported_efforts:['max','high','low'],mandatory:true}}))});
-  if(u.endsWith('/v1/credits'))return json({data:{total_credits:100000,total_usage:0}});
+  if(u.endsWith('/v1/credits'))return json({data:{total_credits:providerCredits,total_usage:0}});
   if(u.includes('geckoterminal'))return json({data:{id:'bsc_'+token,attributes:{address:token,market_cap_usd:'42000',fdv_usd:'50000',price_usd:'.01',total_reserve_in_usd:'5000',volume_usd:{h24:'900'}},relationships:{top_pools:{data:[]}}}});
   if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json(modifyReply({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}},guard))}
   throw Error('Unexpected external call '+u);
  };
- return {sql,calls,coin,wallet(value){walletResult=value},expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0,next_plan_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
+ return {sql,calls,coin,providerCredits(value){providerCredits=value},wallet(value){walletResult=value},expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0,next_plan_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
 }
 test('funded planner has no daily money cap, receives market/fee/cost context and publishes a real site',async()=>{
  const f=fixture();try{
@@ -544,4 +544,49 @@ test('prepaid research and plain text do not require an optional artwork allowan
   f.output({...plan,website:null,publication:{destination:'gallery',text:'An affordable plain text update.',imagePrompt:null,altText:''}});
   assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'queued');
  }finally{f.close();}
+});
+
+
+test('empty OpenRouter keeps funding alive and queues just one affordable deposit across retries',async()=>{
+ const f=fixture();env.SIGNER_SETTLEMENT_ADDRESS=wallet;try{
+  f.providerCredits(0);f.sql.prepare('UPDATE coins SET ai_credit_microusd=0').run();
+  const capabilities=await runtimeCapabilities();assert.ok(capabilities.includes('autonomous-planning'));
+  assert.equal((await runAgentTick(capabilities)).reason,'service_payment_queued');
+  const first=f.sql.prepare('SELECT * FROM agent_operations').get();assert.equal(first.kind,'compute');assert.equal(f.calls.length,0);
+  f.due();assert.equal((await runAgentTick(capabilities)).reason,'transaction_pending');
+  f.sql.prepare("UPDATE agent_operations SET status='awaiting_credit'").run();
+  f.due();assert.equal((await runAgentTick(capabilities)).reason,'service_credit_pending');
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,1);
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,0);assert.equal(f.calls.length,0);
+ }finally{delete env.SIGNER_SETTLEMENT_ADDRESS;f.close();}
+});
+
+test('low provider balance does not stop an agent spending its paid service credit',async()=>{
+ const f=fixture();env.SIGNER_SETTLEMENT_ADDRESS=wallet;try{
+  f.providerCredits(0);const capabilities=await runtimeCapabilities();
+  assert.equal((await runAgentTick(capabilities)).reason,'plan_completed');
+  assert.equal(f.calls.length,2);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,999800);
+ }finally{delete env.SIGNER_SETTLEMENT_ADDRESS;f.close();}
+});
+
+test('low agent credit queues a refill before zero; a saved pending deposit does not stop funded planning',async()=>{
+ const f=fixture();try{
+  f.sql.prepare('UPDATE coins SET ai_credit_microusd=250000').run();
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'service_payment_queued');
+  f.sql.prepare("UPDATE agent_operations SET status='awaiting_credit'").run();
+  f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,1);
+  assert.equal(f.calls.length,2);
+ }finally{f.close();}
+});
+
+test('provider payment errors retain funded credit without making another service deposit',async()=>{
+ const f=fixture();try{
+  f.sql.prepare('UPDATE coins SET ai_credit_microusd=6000000').run();
+  const fetch=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>String(url).endsWith('/chat/completions')?new Response('{}',{status:402}):fetch(url,init);
+  for(let i=0;i<3;i++){f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');}
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,6000000);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+ }finally{f.close()}
 });

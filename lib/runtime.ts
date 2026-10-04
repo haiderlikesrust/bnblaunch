@@ -20,7 +20,7 @@ import { agentModel, GUARDRAIL_MODEL } from "./agent-models";
 import { chatPrice, callCeiling, chatCompletion, PaidCompletionRejected } from "./chat-completion";
 import { AppError, ProviderHttpError, db, type CoinRow } from "./server";
 import { signerRequest } from "./signer";
-import { bnbPrice, computeCapacity, hasPrepaidServices } from "./funding";
+import { bnbPrice, hasPrepaidServices } from "./funding";
 import { chainClient, research } from "./providers";
 import { agentPlan, PLANNER_RULES, PLAN_FORMAT_RULES, PLAN_GUARD_RULES, PUBLICATION_LINK_RULES, validatePlanFunds, publicationLinksAllowed } from "./runtime-policy";
 import type { Coin } from "./model";
@@ -53,9 +53,9 @@ export async function requireWorker(request:Request){
   const [a,b]=await Promise.all([digest(actual),digest("Bearer "+expected)]);let diff=0;for(let i=0;i<a.length;i++)diff|=a[i]^b[i];if(diff)throw new AppError(401,"Worker authentication required.");
 }
 export async function runtimeCapabilities(){
-  if(!env.OPENROUTER_API_KEY||!env.OPENROUTER_MANAGEMENT_KEY)return [];
-  const [signer,capacity]=await Promise.all([signerRequest<{chainId:number;signingReady:boolean;settlementAddress:string;domainFundingEnabled?:boolean}>("/v1/status"),computeCapacity()]);
-  if(signer.chainId!==56||!signer.signingReady||signer.settlementAddress?.toLowerCase()!==env.SIGNER_SETTLEMENT_ADDRESS?.toLowerCase()||capacity.available<=0||capacity.available<capacity.liability)return [];
+  if(!env.OPENROUTER_API_KEY)return [];
+  const signer=await signerRequest<{chainId:number;signingReady:boolean;settlementAddress:string;domainFundingEnabled?:boolean}>("/v1/status");
+  if(signer.chainId!==56||!signer.signingReady||!env.SIGNER_SETTLEMENT_ADDRESS||signer.settlementAddress?.toLowerCase()!==env.SIGNER_SETTLEMENT_ADDRESS.toLowerCase())return [];
   const content=await contentCapabilities();
   return ["funding-reconciliation","cost-reservations","autonomous-planning","transaction-execution","website-publishing",...(domainsConfigured()&&signer.domainFundingEnabled?["custom-domains"]:[]),...content,...(content.includes('x-publishing')&&influencerConfigured()?["influencer-media"]:[]),...(env.BRAVE_API_KEY&&Number(env.BRAVE_COST_MICROUSD)>0?["brave-research"]:[])];
 }
@@ -83,16 +83,14 @@ async function settle(coinId:string,run:{id:string;ceiling:number},cost:number,o
     db().prepare("UPDATE agent_runs SET status='settled',cost_microusd=?,output=?,finished_at=? WHERE id=? AND status='reserved'").bind(cost,output,new Date().toISOString(),run.id),
   ]);
 }
-async function queue(lease:Lease,kind:string,amount:string,reason:string,funding?:{reserve:number;capacity:number}){
+async function queue(lease:Lease,kind:string,amount:string,reason:string,funding?:{reserve:number}){
   const now=Date.now(),id=crypto.randomUUID();
-  await db().prepare(`INSERT INTO agent_operations(id,coin_id,kind,amount_wei,reserved_microusd,status,expires_at,created_at,reason)
+  const result=await db().prepare(`INSERT INTO agent_operations(id,coin_id,kind,amount_wei,reserved_microusd,status,expires_at,created_at,reason)
     SELECT ?,?,?,?,?,'queued',?,?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)
     AND NOT EXISTS(SELECT 1 FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast'))
-    AND (?=0 OR ? >= ? + COALESCE((SELECT SUM(ai_credit_microusd) FROM coins),0)
-      + COALESCE((SELECT SUM(reserved_microusd) FROM chat_runs WHERE status='reserved'),0)
-      + COALESCE((SELECT SUM(reserved_microusd) FROM agent_runs WHERE status='reserved'),0)
-      + COALESCE((SELECT SUM(reserved_microusd) FROM agent_operations WHERE kind='compute' AND status IN ('queued','signed','broadcast')),0))`)
-    .bind(id,lease.coinId,kind,amount,funding?.reserve??0,now+300000,now,reason,lease.coinId,lease.id,now,lease.coinId,funding?.reserve??0,funding?.capacity??0,funding?.reserve??0).run();
+    AND (?!='compute' OR NOT EXISTS(SELECT 1 FROM agent_operations WHERE coin_id=? AND kind='compute' AND status='awaiting_credit'))`)
+    .bind(id,lease.coinId,kind,amount,funding?.reserve??0,now+300000,now,reason,lease.coinId,lease.id,now,lease.coinId,kind,lease.coinId).run();
+  return !!result.meta.changes;
 }
 export async function refreshRuntimeHealth(){
   const capabilities=await runtimeCapabilities();
@@ -101,7 +99,7 @@ export async function refreshRuntimeHealth(){
 }
 export async function runAgentTick(capabilities?:string[]){
   capabilities??=await refreshRuntimeHealth();
-  if(!capabilities.includes("autonomous-planning"))return {processed:false,reason:"runtime_configuration_required"};
+  if(!capabilities.includes("autonomous-planning")&&!capabilities.includes('funding-reconciliation'))return {processed:false,reason:"runtime_configuration_required"};
   const lease=await acquire();if(!lease)return {processed:false,reason:"no_due_agents"};let nextMinutes=.5,nextPlanAt:number|null=null,lastReason="wallet_check_failed";
   const tickResult=(reason:string)=>{lastReason=reason;return {processed:true,reason}};
   const rejectedResult=async(reason:string,diagnostic?:PlanDiagnostic)=>{
@@ -161,30 +159,31 @@ export async function runAgentTick(capabilities?:string[]){
     // The influencer's next spend may trigger a funded top-up; it never blocks planning.
     const coding=await codeContext(coin.id);
     const influencerNeed=(coding.available&&!coding.pending?(codeRate()??0):0)+contentAllowance+(treasuryFunded?await influencerFunding(coin.id).catch(()=>0):0);
-    if(row.ai_credit_microusd<plannerNeed+influencerNeed){
+    // Refill with several planning cycles left, not only after reaching zero.
+    if(row.ai_credit_microusd<Math.max(plannerNeed*3,plannerNeed+influencerNeed)){
       // Below the activation threshold, use already-paid credit only. New
       // payments still require the treasury threshold and all reserve checks.
       if(!treasuryFunded&&row.ai_credit_microusd<plannerNeed)return tickResult("awaiting_service_funding");
       const refill=async()=>{
+        if(await db().prepare("SELECT id FROM agent_operations WHERE coin_id=? AND kind='compute' AND status='awaiting_credit'").bind(coin.id).first())return 'service_credit_pending';
         if(!treasuryFunded)return "awaiting_service_funding";
         lastReason="funding_price_unavailable";
         const price=await bnbPrice();
-        lastReason="service_capacity_unavailable";
-        const capacity=await computeCapacity();
         // A refill can be smaller than the preferred batch. Funds, gas and
-        // provider collateral bound it; no fixed fraction of treasury does.
+        // deposit limits bound it; existing provider credit does not.
         const affordable=Number((available>minimumGas?available-minimumGas:0n)*price.answer/100000000000000000000n);
-        const target=Math.floor(Math.min(Math.max(5000000,(plannerNeed+influencerNeed)*8),affordable,(capacity.available-capacity.liability)/1.2));
-        if(target+row.ai_credit_microusd<plannerNeed+influencerNeed||target<=0)return "awaiting_service_funding";
-        const payment=serviceFundingAmount({targetMicrousd:target,price:price.answer,availableWei:available>minimumGas?available-minimumGas:0n,capacityMicrousd:capacity.available-capacity.liability,address:env.SIGNER_SETTLEMENT_ADDRESS});
+        const target=Math.floor(Math.min(Math.max(5000000,(plannerNeed+influencerNeed)*8),affordable));
+        if(target+row.ai_credit_microusd<plannerNeed||target<=0)return "awaiting_service_funding";
+        const payment=serviceFundingAmount({targetMicrousd:target,price:price.answer,availableWei:available>minimumGas?available-minimumGas:0n,address:env.SIGNER_SETTLEMENT_ADDRESS});
         if(!payment)return "service_deposit_minimum_or_collateral_required";
         const {amountWei:amount,reserveMicrousd:fundingReserve}=payment;
-        await queue(lease,"compute",amount.toString(),"Prepay metered agent services from treasury.",{reserve:fundingReserve,capacity:capacity.available});return "service_payment_queued";
+        return await queue(lease,"compute",amount.toString(),"Prepay metered agent services from treasury.",{reserve:fundingReserve})?'service_payment_queued':'awaiting_service_funding';
       };
       if(row.ai_credit_microusd<plannerNeed)return tickResult(await refill());
       // Optional media is short: a deferred or failed top-up keeps text/research planning.
       if(await refill().catch(()=>null)==="service_payment_queued")return tickResult("service_payment_queued");
     }
+    if(!capabilities.includes('autonomous-planning'))return tickResult('service_credit_pending');
     lastReason="planning_context_unavailable";
     const tokenBalance=await chainClient().readContract({address:coin.tokenAddress as Address,abi:parseAbi(["function balanceOf(address) view returns(uint256)"]),functionName:"balanceOf",args:[wallet.address as Address]});
     const [community,market,hosted,costs,domains,operations]=await Promise.all([contentSnapshot(coin),Promise.resolve(currentMarket),publishedWebsite(coin.id),db().prepare(`SELECT

@@ -19,10 +19,10 @@ async function recordedCapabilities(){
 }
 
 // Checks that make no paid model call; several share one worker pass.
-const CHEAP=new Set(['awaiting_treasury_funding','transaction_pending','provider_cost_reconciliation_required','domain_payment_pending','awaiting_next_plan','awaiting_service_funding','service_payment_queued','service_deposit_minimum_or_collateral_required','fee_verification_failed','historical_rpc_required','rpc_log_limit','fee_audit_pending','coin_unavailable']);
+const CHEAP=new Set(['awaiting_treasury_funding','transaction_pending','provider_cost_reconciliation_required','domain_payment_pending','awaiting_next_plan','awaiting_service_funding','service_credit_pending','service_payment_queued','service_deposit_minimum_or_collateral_required','fee_verification_failed','historical_rpc_required','rpc_log_limit','fee_audit_pending','coin_unavailable']);
 // Unsigned operations expire in minutes, so they go first; long-running ones
 // rotate randomly so a few stuck campaigns cannot starve newer coins.
-export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast') ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END,random() LIMIT 30").all();return response({operations:ops.results,domainFunding:await domainFundingRequests()});}catch(e){return failure(e)}}
+export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast','awaiting_credit') ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END,random() LIMIT 30").all();return response({operations:ops.results,domainFunding:await domainFundingRequests()});}catch(e){return failure(e)}}
 const payload=z.discriminatedUnion("action",[z.object({action:z.literal("coding")}).strict(),z.object({action:z.literal("content")}).strict(),z.object({action:z.literal("index")}).strict(),z.object({action:z.literal("domains")}).strict(),z.object({action:z.literal("influencer")}).strict(),z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
 export async function POST(request:Request){try{
   await requireWorker(request);const input=payload.parse(await body(request));
@@ -32,7 +32,7 @@ export async function POST(request:Request){try{
   if(input.action==="domains")return response(await runDomainTick());
   if(input.action==="influencer")return response(await runInfluencerTick(await recordedCapabilities()));
   if(input.action==="tick"){
-    const capabilities=await refreshRuntimeHealth();if(!capabilities.includes('autonomous-planning'))return response({processed:false,reason:'runtime_configuration_required'});
+    const capabilities=await refreshRuntimeHealth();if(!capabilities.includes('autonomous-planning')&&!capabilities.includes('funding-reconciliation'))return response({processed:false,reason:'runtime_configuration_required'});
     // Publication processing has its own worker action so it cannot starve planning.
     // Cheap wallet checks for several coins share a pass; a paid planning
     // cycle (or any rejection) ends it, so one coin cannot delay the rest.
@@ -65,7 +65,7 @@ export async function POST(request:Request){try{
   }
   if(intent.coinId!==op.coin_id||intent.kind!==op.kind||intent.amountWei!==op.amount_wei||!intent.hash)throw new AppError(503,"Signing journal does not match the saved operation.");
   const hash=intent.hash as Hex;
-  if(intent.status==="confirmed"&&op.kind==="compute"){await settleComputePayment(op,hash);return response({status:"confirmed"});}
+  if(intent.status==="confirmed"&&op.kind==="compute"){return response(await settleComputePayment(op,hash));}
   if(intent.status==="confirmed"||intent.status==="reverted"){
     const client=chainClient(),receipt=await client.getTransactionReceipt({hash}),head=await client.getBlockNumber(),block=await client.getBlock({blockNumber:receipt.blockNumber});
     if(head-receipt.blockNumber<3n||receipt.blockHash!==block.hash||((receipt.status==="success")!==(intent.status==="confirmed")))throw new AppError(409,"Transaction receipt is awaiting reconciliation.");

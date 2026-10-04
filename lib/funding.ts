@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { parseAbi, isAddress, type Address, type Hex } from "viem";
-import { AppError, db, remoteJson } from "./server";
+import { AppError, db } from "./server";
 import { chainClient } from "./providers";
 
 // Standard BNB/USD feed, distinct from the 18-decimal SVR feed.
@@ -28,18 +28,6 @@ export async function hasPrepaidServices(coinId:string,creditMicrousd:number){
   if(!Number.isSafeInteger(creditMicrousd)||creditMicrousd<=0)return false;
   return !!await db().prepare("SELECT settlement_id FROM compute_funding WHERE coin_id=? AND amount_microusd>0 LIMIT 1").bind(coinId).first();
 }
-export async function computeCapacity(){
-  if(!env.OPENROUTER_MANAGEMENT_KEY)throw new AppError(412,"Compute funding reconciliation is not configured.");
-  const result=await remoteJson<{data:{total_credits:number;total_usage:number}}>("https://openrouter.ai/api/v1/credits",{headers:{Authorization:"Bearer "+env.OPENROUTER_MANAGEMENT_KEY}});
-  const {total_credits, total_usage}=result.data;
-  if(!Number.isFinite(total_credits)||!Number.isFinite(total_usage)||total_credits<0||total_usage<0)throw new AppError(503,"Compute account balance could not be verified.");
-  const liability=await db().prepare(`SELECT
-    COALESCE((SELECT SUM(ai_credit_microusd) FROM coins),0)+
-    COALESCE((SELECT SUM(reserved_microusd) FROM chat_runs WHERE status='reserved'),0)+
-    COALESCE((SELECT SUM(reserved_microusd) FROM agent_runs WHERE status='reserved'),0)+
-    COALESCE((SELECT SUM(reserved_microusd) FROM agent_operations WHERE kind='compute' AND status IN ('queued','signed','broadcast')),0) AS total`).first<{total:number}>();
-  return {available:Math.max(0,Math.floor((total_credits-total_usage)*1e6*.9)),liability:liability?.total??0};
-}
 export async function settleComputePayment(op:{id:string;coin_id:string;amount_wei:string;created_at:number},hash:Hex){
   if(!env.SIGNER_SETTLEMENT_ADDRESS||!isAddress(env.SIGNER_SETTLEMENT_ADDRESS))throw new AppError(412,"Compute settlement wallet is missing.");
   const wallet=await db().prepare("SELECT address FROM agent_wallets WHERE coin_id=?").bind(op.coin_id).first<{address:string}>();
@@ -50,20 +38,24 @@ export async function settleComputePayment(op:{id:string;coin_id:string;amount_w
   if(block.hash!==receipt.blockHash||Number(block.timestamp)*1000<op.created_at-60000)throw new AppError(409,"Service payment receipt changed or predates its intent.");
   const price=await bnbPrice(receipt.blockNumber),credit=Number(usdMicros(tx.value,price.answer));
   if(!Number.isSafeInteger(credit)||credit<=0)throw new AppError(409,"Invalid confirmed credit value.");
-  if(await db().prepare("SELECT settlement_id FROM compute_funding WHERE settlement_id=?").bind(hash).first())return;
-  const capacity=await computeCapacity();
-  // SQL repeats the liability check atomically; parallel settlements cannot each
-  // allocate the same centrally funded OpenRouter balance.
+  if(await db().prepare("SELECT settlement_id FROM compute_funding WHERE settlement_id=? AND coin_id=?").bind(hash,op.coin_id).first())return {status:'confirmed'};
+  const valuation=JSON.stringify({feed:FEED,decimals:8,roundId:price.roundId.toString(),answer:price.answer.toString(),updatedAt:price.updatedAt.toString(),blockNumber:receipt.blockNumber.toString(),blockHash:receipt.blockHash,amountWei:tx.value.toString()});
+  // The operator uses SolCard auto top-up. Confirmed BNB funds the internal
+  // service ledger; this receipt is not proof of an OpenRouter card purchase.
+  // Persist before allocation so retries reuse this deposit after a crash.
+  await db().prepare("UPDATE agent_operations SET status='awaiting_credit',tx_hash=?,details=? WHERE id=? AND coin_id=? AND kind='compute' AND status IN ('queued','signed','broadcast','awaiting_credit')")
+    .bind(hash,JSON.stringify({stage:'deposit_confirmed',creditMicrousd:credit,valuation:JSON.parse(valuation)}),op.id,op.coin_id).run();
+  // Credit exactly once per confirmed deposit, independent of provider balance.
   const results=await db().batch([
     db().prepare(`INSERT INTO compute_funding(settlement_id,coin_id,amount_microusd,settled_at,valuation)
-      SELECT ?,?,?,?,? WHERE ? >= ? + COALESCE((SELECT SUM(ai_credit_microusd) FROM coins),0)
-      + COALESCE((SELECT SUM(reserved_microusd) FROM chat_runs WHERE status='reserved'),0)
-      + COALESCE((SELECT SUM(reserved_microusd) FROM agent_runs WHERE status='reserved'),0)
-      + COALESCE((SELECT SUM(reserved_microusd) FROM agent_operations WHERE kind='compute' AND status IN ('queued','signed','broadcast') AND id!=?),0)
-      AND EXISTS(SELECT 1 FROM agent_operations WHERE id=? AND status!='confirmed') ON CONFLICT(settlement_id) DO NOTHING`)
-      .bind(hash,op.coin_id,credit,Number(block.timestamp)*1000,JSON.stringify({feed:FEED,decimals:8,roundId:price.roundId.toString(),answer:price.answer.toString(),updatedAt:price.updatedAt.toString(),blockNumber:receipt.blockNumber.toString(),blockHash:receipt.blockHash,amountWei:tx.value.toString()}),capacity.available,credit,op.id,op.id),
-    db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd+? WHERE id=? AND EXISTS(SELECT 1 FROM compute_funding WHERE settlement_id=? AND coin_id=?) AND EXISTS(SELECT 1 FROM agent_operations WHERE id=? AND status!='confirmed')").bind(credit,op.coin_id,hash,op.coin_id,op.id),
-    db().prepare("UPDATE agent_operations SET status='confirmed',tx_hash=? WHERE id=? AND EXISTS(SELECT 1 FROM compute_funding WHERE settlement_id=? AND coin_id=?)").bind(hash,op.id,hash,op.coin_id),
+      SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM agent_operations WHERE id=? AND coin_id=? AND status='awaiting_credit' AND tx_hash=?) ON CONFLICT(settlement_id) DO NOTHING`)
+      .bind(hash,op.coin_id,credit,Number(block.timestamp)*1000,valuation,op.id,op.coin_id,hash),
+    db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd+? WHERE id=? AND EXISTS(SELECT 1 FROM compute_funding WHERE settlement_id=? AND coin_id=?) AND EXISTS(SELECT 1 FROM agent_operations WHERE id=? AND status='awaiting_credit')").bind(credit,op.coin_id,hash,op.coin_id,op.id),
+    db().prepare("UPDATE runtime_leases SET next_run_at=0,next_plan_at=0 WHERE coin_id=? AND EXISTS(SELECT 1 FROM compute_funding WHERE settlement_id=? AND coin_id=?) AND EXISTS(SELECT 1 FROM agent_operations WHERE id=? AND status='awaiting_credit')").bind(op.coin_id,hash,op.coin_id,op.id),
+    db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,id,owner,json_extract(config,'$.name'),?,? FROM coins WHERE id=? AND EXISTS(SELECT 1 FROM compute_funding WHERE settlement_id=? AND coin_id=?) ON CONFLICT(id) DO NOTHING").bind('service-credit:'+op.id,`Service credit funded: $${(credit/1e6).toFixed(6)}. Deposit: ${hash}`,new Date().toISOString(),op.coin_id,hash,op.coin_id),
+    db().prepare("UPDATE agent_operations SET status='confirmed',tx_hash=?,details=? WHERE id=? AND status='awaiting_credit' AND EXISTS(SELECT 1 FROM compute_funding WHERE settlement_id=? AND coin_id=?)").bind(hash,JSON.stringify({stage:'credit_available',creditMicrousd:credit,valuation:JSON.parse(valuation)}),op.id,hash,op.coin_id),
   ]);
-  if(!results[0].meta.changes)throw new AppError(412,"Service payment is confirmed; credit awaits available central compute funding.");
+  if(results[0].meta.changes)return {status:'confirmed'};
+  const saved=await db().prepare("SELECT status FROM agent_operations WHERE id=?").bind(op.id).first<{status:string}>();
+  return {status:saved?.status==='confirmed'?'confirmed':'awaiting_credit'};
 }
