@@ -40,12 +40,12 @@ export class SigningEngine {
     if(!wallet) throw Error('Agent wallet must be provisioned first');
     const head=await this.chainReady();
     const [tx,receipt]=await Promise.all([this.client.getTransaction({hash}),this.client.getTransactionReceipt({hash})]);
-    if(receipt.status!=='success'||head.number-receipt.blockNumber<3n||!same(tx.to,PORTAL)||tx.value!==0n) throw Error('Confirmed Flap launch required');
+    if(receipt.status!=='success'||head.number-receipt.blockNumber<3n||!same(tx.to,PORTAL)) throw Error('Confirmed Flap launch required');
     const canonical=await this.client.getBlock({blockNumber:receipt.blockNumber});
     if(canonical.hash!==receipt.blockHash) throw Error('Launch receipt is not canonical');
     const {functionName,args}=decodeFunctionData({abi:portalAbi,data:tx.input});
     const p=args?.[0];
-    if(functionName!=='newTokenV6'||!p||!same(p.beneficiary,wallet.address)||p.tokenVersion!==6||p.mktBps!==10000||p.deflationBps!==0||p.dividendBps!==0||p.lpBps!==0||p.buyTaxRate!==300||p.sellTaxRate!==300||p.quoteAmt!==0n||p.quoteToken!==zeroAddress||p.dexId!==0||p.migratorType!==1||p.extensionID!=='0x'+'0'.repeat(64)) throw Error('Launch does not bind platform economics to this agent wallet');
+    if(functionName!=='newTokenV6'||!p||!same(p.beneficiary,wallet.address)||p.tokenVersion!==6||p.mktBps!==10000||p.deflationBps!==0||p.dividendBps!==0||p.lpBps!==0||p.buyTaxRate!==300||p.sellTaxRate!==300||tx.value!==p.quoteAmt||p.quoteToken!==zeroAddress||p.dexId!==0||p.migratorType!==1||p.extensionID!=='0x'+'0'.repeat(64)||p.extensionData!=='0x'||p.permitData!=='0x'||p.commissionReceiver!==zeroAddress||p.dividendToken!==zeroAddress||p.taxDuration!==31536000n||p.antiFarmerDuration!==3600n) throw Error('Launch does not bind platform economics to this agent wallet');
     const token=getContractAddress({from:PORTAL,salt:p.salt,bytecode:'0x3d602d80600a3d3981f3363d3d373d3d3d363d73'+TAX_V3_IMPL.slice(2).toLowerCase()+'5af43d82803e903d91602b57fd5bf3',opcode:'CREATE2'});
     const code=await this.client.getCode({address:token,blockNumber:receipt.blockNumber});
     const expected='0x363d3d373d3d3d363d73'+TAX_V3_IMPL.slice(2).toLowerCase()+'5af43d82803e903d91602b57fd5bf3';
