@@ -32,6 +32,17 @@ function assertSettled(f,cost){const run=f.sql.prepare('SELECT status,cost_micro
 test('public Q&A settles all three verified costs after successful guards',async()=>{
  const f=await fixture();try{const response=await f.post();assert.equal(response.status,200);assert.equal((await response.json()).blocked,false);assert.equal(f.calls.length,3);assertSettled(f,300)}finally{f.close()}
 });
+test('Q&A validates the public origin behind a proxy and rejects foreign origins',async()=>{
+ const f=await fixture();env.APP_ORIGIN='https://shen.test';env.SHEN_RUNTIME='node';
+ try{
+  const request=origin=>new Request('http://web:3000/api/coins/'+f.id+'/chat',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({message:'What is your purpose?'})});
+  const params={params:Promise.resolve({id:f.id})};
+  assert.equal((await POST(request('https://attacker.test'),params)).status,403);
+  assert.equal(f.calls.length,0);
+  assert.equal((await POST(request('https://shen.test'),params)).status,200);
+  assertSettled(f,300);
+ }finally{delete env.APP_ORIGIN;delete env.SHEN_RUNTIME;f.close()}
+});
 for(const [kind,stage] of [['truncated',1],['invalid-json',2],['missing-message',3],['tool-call',2],['extra-choice',1]])test(`Q&A settles verified ${kind} output without further calls or actions`,async()=>{
  const f=await fixture();try{
   f.modifyReply((reply,current)=>{if(current!==stage)return reply;if(kind==='truncated')reply.choices[0].finish_reason='length';else if(kind==='invalid-json')reply.choices[0].message.content='not JSON';else if(kind==='missing-message')delete reply.choices[0].message;else if(kind==='tool-call')reply.choices[0].message.tool_calls=[{name:'post'}];else reply.choices.push(reply.choices[0]);return reply});

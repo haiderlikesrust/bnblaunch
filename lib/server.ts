@@ -4,7 +4,13 @@ import type { Coin } from "./model";
 export class AppError extends Error{status:number;constructor(status:number,message:string){super(message);this.status=status}}
 export function db(){if(!env.DB)throw new AppError(503,"Storage unavailable. Your input has not been discarded.");return env.DB;}
 export async function identity(request?:Request){if(request&&request.method!=="GET"&&!validOrigin(request))throw new AppError(403,"Cross-origin request rejected.");const user=await getUser();if(!user)throw new AppError(401,"请先连接钱包。Sign in with your wallet to continue.");return user.userId;}
-export async function body(request:Request,maxBytes=20000){if(Number(request.headers.get('content-length')??0)>maxBytes)throw new AppError(413,"Request too large");const reader=request.body?.getReader();let raw='',size=0;const decoder=new TextDecoder();if(reader){while(true){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.byteLength;if(size>maxBytes){await reader.cancel();throw new AppError(413,"Request too large");}raw+=decoder.decode(chunk.value,{stream:true});}raw+=decoder.decode();}try{return JSON.parse(raw)}catch{throw new AppError(400,"Invalid JSON")}}
+export async function readBody(request:Request,maxBytes=20000){
+ if(Number(request.headers.get('content-length')??0)>maxBytes)throw new AppError(413,"Request too large");
+ const reader=request.body?.getReader(),parts:Uint8Array[]=[];let size=0;
+ if(reader)try{for(;;){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.byteLength;if(size>maxBytes){await reader.cancel();throw new AppError(413,"Request too large");}parts.push(chunk.value);}}finally{reader.releaseLock();}
+ const bytes=new Uint8Array(size);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.byteLength;}return bytes;
+}
+export async function body(request:Request,maxBytes=20000){const bytes=await readBody(request,maxBytes);try{return JSON.parse(new TextDecoder().decode(bytes))}catch{throw new AppError(400,"Invalid JSON")}}
 export function response(data:unknown,status=200){return Response.json(data,{status,headers:{"Cache-Control":"no-store"}})}
 export function failure(error:unknown){if(error instanceof AppError)return response({error:error.message},error.status);if(error&&typeof error==="object"&&"issues" in error)return response({error:"Invalid input",details:(error as {issues:unknown}).issues},400);console.error("Request failed",error instanceof Error?error.message:"unknown");return response({error:"Service unavailable. Please retry later; your input is preserved."},503)}
 export type CoinRow={id:string;owner:string;config:string;token_address:string|null;treasury_address:string|null;ai_credit_microusd:number;daily_limit_microusd:number};

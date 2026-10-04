@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { coinUrl } from "@/lib/coin-links";
 import { z } from "zod";
-import { AppError, body, db, failure, identity, ownedCoin, remoteJson, response } from "@/lib/server";
+import { AppError, body, db, failure, identity, ownedCoin, readBody, remoteJson, response } from "@/lib/server";
 import { validateImage } from "@/lib/token-image";
 
 export async function POST(request:Request,{params}:{params:Promise<{id:string}>}){try{
@@ -16,8 +16,11 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
   file=new File([bytes],`token.${saved.mime.split('/')[1]}`,{type:saved.mime});
  }else{
   if(coin.imageUrl)throw new AppError(400,"Use the image saved with this launch plan.");
-  if(Number(request.headers.get("content-length")||0)>2200000)throw new AppError(413,"Logo must be less than 2 MB");
-  const form=await request.formData(),value=form.get("image");
+  // Bound the stream before multipart parsing, including chunked requests that
+  // omit Content-Length. Per-file validation alone happens after allocation.
+  const bytes=await readBody(request,2200000);
+  let form:FormData;try{form=await new Response(bytes,{headers:{'Content-Type':request.headers.get('content-type')??''}}).formData()}catch{throw new AppError(400,"Invalid image upload");}
+  const value=form.get("image");
   if(!(value instanceof File)||value.size>2000000||value.size<12||!["image/png","image/jpeg","image/webp"].includes(value.type))throw new AppError(400,"Use a PNG, JPEG or WebP smaller than 2 MB");
   const b=new Uint8Array(await value.slice(0,12).arrayBuffer());
   const valid=(value.type==="image/png"&&b[0]===137&&b[1]===80&&b[2]===78&&b[3]===71)||(value.type==="image/jpeg"&&b[0]===255&&b[1]===216)||(value.type==="image/webp"&&String.fromCharCode(...b.slice(0,4))==="RIFF"&&String.fromCharCode(...b.slice(8,12))==="WEBP");

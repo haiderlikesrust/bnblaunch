@@ -38,6 +38,10 @@ const localBindingConfig = {
 export default defineConfig(async ({ command }) => {
   if(process.env.SHEN_RUNTIME==='node')return {
     plugins:[vinext()],
+    // Link lazy-loads navigation as a module namespace. Without strict entry
+    // signatures, the production bundler merges it into the entry and exposes
+    // renamed chunk exports instead, breaking every client-side navigation.
+    environments:{client:{build:{rollupOptions:{preserveEntrySignatures:'strict' as const}}}},
     resolve:{alias:{'cloudflare:workers':fileURLToPath(new URL('./server/node-env.ts',import.meta.url))}},
   };
   // Use Miniflare's local Request.cf placeholder unless fetching is requested.

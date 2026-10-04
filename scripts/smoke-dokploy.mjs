@@ -16,6 +16,11 @@ const platformFetch=(url,init={})=>new Promise((resolve,reject)=>{
 const health=await (await platformFetch(base+'/api/health')).json();assert.equal(health.ok,true);assert.equal(health.database,'postgres');
 for(const path of ['/','/launch','/agents','/activity','/signin','/docs','/shen-symbol.png','/models/glm.svg','/models/kimi.png'])assert.equal((await platformFetch(base+path)).status,200,path);
 assert.equal((await platformFetch(base+'/api/internal/worker')).status,404,'Worker API is private at gateway');
+const oauthCallback=await platformFetch(base+'/api/social/x/callback');
+assert.equal(oauthCallback.headers.get('referrer-policy'),'no-referrer');
+assert.equal(oauthCallback.headers.get('x-content-type-options'),'nosniff');
+assert.equal(oauthCallback.headers.get('x-frame-options'),'DENY');
+assert.match(oauthCallback.headers.get('content-security-policy'),/frame-ancestors 'none'/);
 const account=privateKeyToAccount(generatePrivateKey());
 const post=async(path,data,cookie)=>platformFetch(base+path,{method:'POST',headers:{Origin:origin,'Content-Type':'application/json',...(cookie?{Cookie:cookie}:{})},body:JSON.stringify(data)});
 const auth=await (await post('/api/auth',{action:'challenge',wallet:account.address})).json();

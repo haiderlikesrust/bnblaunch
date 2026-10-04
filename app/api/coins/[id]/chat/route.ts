@@ -22,9 +22,9 @@ export async function GET(_request:Request,{params}:{params:Promise<{id:string}>
 }
 export async function POST(request:Request,{params}:{params:Promise<{id:string}>}){
  try{
-  if(request.headers.get("origin")!==new URL(request.url).origin)throw new AppError(403,"Cross-origin request rejected.");
-  const {message}=await input(request),{id}=await params;
+  // identity validates the configured public origin, including behind a proxy.
   const viewer=await identity(request);
+  const {message}=await input(request),{id}=await params;
   const row=await db().prepare("SELECT * FROM coins WHERE id=? AND (token_address IS NOT NULL OR owner=?)").bind(id,viewer).first<CoinRow>();
   if(!row)throw new AppError(404,"Coin not found.");
   const coin=JSON.parse(row.config) as Coin;

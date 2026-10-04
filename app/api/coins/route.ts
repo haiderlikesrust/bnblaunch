@@ -14,7 +14,7 @@ export async function POST(request:Request){try{
  await db().batch([
   db().prepare("INSERT INTO coins (id,owner,config,created_at,updated_at) VALUES (?,?,?,?,?)").bind(id,owner,JSON.stringify(coin),now,now),
   ...(image?[db().prepare("INSERT INTO coin_images (coin_id,mime,base64) VALUES (?,?,?)").bind(id,image.mime,image.base64)]:[]),
-  eventStatement(coin,owner,"Launch plan saved. 100% of distributable fees route to the agent; service costs are paid first. No token launched.")
+  eventStatement(coin,owner,"Launch plan saved. 85% of distributable fees fund the agent, with service costs paid first; 15% fund system SHEN buybacks and burns. No token launched.")
  ]);
  return response({coin},201)
 }catch(e){return failure(e)}}
