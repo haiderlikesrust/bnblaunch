@@ -25,10 +25,10 @@ function fixture(){
  sql.prepare('INSERT INTO coins(id,owner,config,token_address,treasury_address,created_at,updated_at,ai_credit_microusd) VALUES(?,?,?,?,?,?,?,?)').run('coin','owner',JSON.stringify(coin),token,wallet,new Date(now).toISOString(),new Date(now).toISOString(),1000000);
  globalThis.__plannerChain={getChainId:async()=>56,getBlock:async()=>({number:100n,hash:'0x'+'a'.repeat(64),timestamp:BigInt(Math.floor(Date.now()/1000))}),readContract:async({functionName})=>{
   const values={balanceOf:0n,taxProcessor:processor,taxToken:token,marketAddress:wallet,weth:'0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',feeConfigV2:{isWeth:true,marketBps:10000,lpBps:0,dividendBps:0,deflationBps:0},totalQuoteSentToMarketing:1000000n,marketQuoteBalance:5n,decimals:8,latestRoundData:[1n,60000000000n,0n,BigInt(Math.floor(Date.now()/1000)),1n]};if(!(functionName in values))throw Error(functionName);return values[functionName];}};
- let expiry=false,reject=false,fail=false,output=plan,modifyReply=(reply)=>reply;const calls=[];
+ let walletResult={protocolReserveWei:"0",feeAccountingReady:true},expiry=false,reject=false,fail=false,output=plan,modifyReply=(reply)=>reply;const calls=[];
  const json=v=>new Response(JSON.stringify(v));
  globalThis.fetch=async(url,init={})=>{const u=String(url);
-  if(u.endsWith('/balance'))return json({address:wallet,tokenAddress:token,balanceWei:'1000000000000000000',observedAt:now,block:'100'});
+  if(u.endsWith('/balance'))return json({address:wallet,tokenAddress:token,balanceWei:'1000000000000000000',observedAt:now,block:'100',...walletResult});
   if(u.endsWith('/v1/status'))return json({chainId:56,signingReady:true,settlementAddress:wallet,gasReserveWei:'2000000000000000',buybacksEnabled:false});
   if(u.endsWith('/v1/models'))return json({data:[...new Set([DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL])].map(id=>({id,pricing:{prompt:'0.000001',completion:'0.000001'},supported_parameters:['response_format']}))});
   if(u.endsWith('/v1/credits'))return json({data:{total_credits:100000,total_usage:0}});
@@ -36,7 +36,7 @@ function fixture(){
   if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json(modifyReply({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}},guard))}
   throw Error('Unexpected external call '+u);
  };
- return {sql,calls,coin,expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0,next_plan_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
+ return {sql,calls,coin,wallet(value){walletResult=value},expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0,next_plan_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
 }
 test('funded planner has no daily money cap, receives market/fee/cost context and publishes a real site',async()=>{
  const f=fixture();try{
@@ -164,5 +164,17 @@ test('unfunded agents recheck in thirty seconds without paid model calls',async(
   const schedule=f.sql.prepare('SELECT next_run_at FROM runtime_leases').get();
   assert.ok(schedule.next_run_at-Date.now()<=30000&&schedule.next_run_at>Date.now());
   assert.equal(f.calls.length,0);
+ }finally{f.close()}
+});
+
+
+test('fee audit failure records real balance and reason without authorizing spending',async()=>{
+ const f=fixture();try{
+  f.wallet({protocolReserveWei:null,feeAccountingReady:false,feeAccountingIssue:'rpc_log_limit'});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'rpc_log_limit');
+  assert.equal(JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config).balance,1);
+  const checked=f.sql.prepare('SELECT last_checked_at,last_reason FROM runtime_leases').get();
+  assert.ok(checked.last_checked_at>0);assert.equal(checked.last_reason,'rpc_log_limit');
+  assert.equal(f.calls.length,0);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
  }finally{f.close()}
 });

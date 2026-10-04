@@ -8,22 +8,28 @@ export async function agentConsole(coin: Coin) {
     db().prepare("SELECT status,updated_at FROM content_jobs WHERE coin_id=? AND status NOT IN ('complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
     db().prepare("SELECT kind,status,created_at FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ kind: string; status: string; created_at: number }>(),
     db().prepare("SELECT status,updated_at FROM domain_orders WHERE coin_id=? AND status NOT IN ('live','complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
-    db().prepare('SELECT lease_until,next_run_at FROM runtime_leases WHERE coin_id=?').bind(coin.id).first<{ lease_until: number; next_run_at: number }>(),
-    db().prepare('SELECT checked_at FROM runtime_health ORDER BY checked_at DESC LIMIT 1').first<{ checked_at: number }>(),
+    db().prepare('SELECT lease_until,next_run_at,last_checked_at,last_reason FROM runtime_leases WHERE coin_id=?').bind(coin.id).first<{ lease_until: number; next_run_at: number;last_checked_at:number|null;last_reason:string|null }>(),
+    db().prepare("SELECT checked_at,capabilities FROM runtime_health WHERE id='worker'").first<{ checked_at: number;capabilities:string }>(),
     db().prepare('SELECT id,message,created_at FROM events WHERE coin_id=? ORDER BY created_at DESC LIMIT 8').bind(coin.id).all<{ id: string; message: string; created_at: string }>(),
     db().prepare('SELECT COUNT(*) AS entries,MAX(created_at) AS updated FROM agent_memories WHERE coin_id=?').bind(coin.id).first<{ entries: number; updated: number | null }>(),
   ]);
   let state = 'scheduled', changedAt: number | null = null;
   const stale = !health || now - health.checked_at > 180000;
+  let capable=false;try{capable=JSON.parse(health?.capabilities??'[]').includes('autonomous-planning')}catch{}
   if (!coin.tokenAddress) state = 'awaiting_launch';
   else if (stale) state = 'worker_unconfirmed';
+  else if (!capable) state = 'services_unavailable';
   else if (research?.status === 'searching' && now - research.started_at < 120000) { state = 'researching'; changedAt = research.started_at; }
   else if (operation) { state = operation.kind === 'compute' ? 'funding_services' : 'transaction_pending'; changedAt = operation.created_at; }
   else if (content) { state = ['uncertain', 'reconciling'].includes(content.status) ? 'verification_pending' : content.status === 'posting' ? 'posting' : content.status === 'generating' ? 'creating_image' : 'publication_queued'; changedAt = content.updated_at; }
   else if (domain) { state = 'domain_pending'; changedAt = domain.updated_at; }
   else if (run?.status === 'reserved') { state = lease && lease.lease_until > now ? 'planning' : 'verification_pending'; changedAt = Date.parse(run.created_at); }
-  else if (coin.balance < coin.threshold) state = 'awaiting_funds';
   else if (lease && lease.lease_until > now) state = 'checking';
-  return { state, changedAt, observedAt: now, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,
+  else if (lease?.last_reason) {
+    const states:Record<string,string>={awaiting_treasury_funding:'awaiting_funds',historical_rpc_required:'historical_rpc_required',rpc_log_limit:'rpc_log_limit',fee_audit_pending:'fee_audit_pending',fee_verification_failed:'fee_verification_failed',wallet_check_failed:'wallet_check_failed',service_check_failed:'service_check_failed',awaiting_service_funding:'awaiting_service_credit',service_deposit_minimum_or_collateral_required:'service_funding_blocked',awaiting_next_plan:'scheduled',plan_completed:'scheduled',plan_rejected:'plan_rejected'};
+    state=states[lease.last_reason]??'checking';changedAt=lease.last_checked_at;
+  }
+  else state='check_unconfirmed';
+  return { state, changedAt, observedAt: now,lastCheckAt:lease?.last_checked_at??null, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,
     memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
 }

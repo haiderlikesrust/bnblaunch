@@ -65,12 +65,12 @@ test('console is public only after launch, reports stale workers and excludes pr
   sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...coin,tokenAddress:'0x1',balance:1,threshold:.1}));
   const get=()=>consoleGET(new Request('https://shen.now'),{params:Promise.resolve({id:'coin'})});
   assert.equal((await (await get()).json()).state,'worker_unconfirmed');
-  sql.prepare("INSERT INTO runtime_health(id,checked_at,capabilities,version) VALUES('worker',?,'[]','1')").run(Date.now());
+  sql.prepare("INSERT INTO runtime_health(id,checked_at,capabilities,version) VALUES('worker',?,?,'1')").run(Date.now(),JSON.stringify(['autonomous-planning']));
   sql.prepare("INSERT INTO research_runs VALUES('active','coin','query','searching','[]',?,NULL)").run(Date.now());
   sql.prepare("INSERT INTO agent_memories VALUES('private','coin','private summary','private next steps',?)").run(Date.now());
   const live=await (await get()).json();assert.equal(live.state,'researching');assert.equal(live.memory.entries,1);assert.equal(JSON.stringify(live).includes('private'),false);
   sql.prepare('UPDATE research_runs SET started_at=?').run(Date.now()-180000);
-  assert.equal((await (await get()).json()).state,'scheduled');
+  assert.equal((await (await get()).json()).state,'check_unconfirmed');
   sql.prepare('UPDATE runtime_health SET checked_at=?').run(Date.now()-180001);
   assert.equal((await (await get()).json()).state,'worker_unconfirmed');
   sql.exec('UPDATE coins SET token_address=NULL');globalThis.__researchViewer=null;assert.equal((await get()).status,404);

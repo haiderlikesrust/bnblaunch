@@ -9,6 +9,7 @@ import { WalletStore, authenticate } from './store.mjs';
 import { Campaigns } from './campaigns.mjs';
 import { SigningEngine } from './engine.mjs';
 import { ProtocolFees } from './protocol-fees.mjs';
+import { walletBalanceSnapshot } from './balance.mjs';
 
 process.umask(0o077);
 const env=process.env;
@@ -77,10 +78,7 @@ const server=createServer(async(req,res)=>{
       if(action==='launch'&&web&&req.method==='POST'){const v=await body(req);exact(v,['hash']);if(!/^0x[0-9a-f]{64}$/i.test(v.hash)) throw Error('Invalid hash');return send(res,200,await engine.bindLaunch(coinId,v.hash));}
       if(action==='balance'&&req.method==='GET'){
         const wallet=store.wallet(coinId);if(!wallet) return send(res,404,{error:'Wallet not found'});
-        const head=await engine.chainReady(),blockNumber=head.number-3n;
-        const balance=await client.getBalance({address:wallet.address,blockNumber});
-        const fees=await protocolFees.quote(wallet);
-        return send(res,200,{coinId,address:wallet.address,tokenAddress:wallet.token_address,balanceWei:balance.toString(),protocolReserveWei:fees.reserveWei,block:blockNumber.toString(),observedAt:Date.now()});
+        return send(res,200,await walletBalanceSnapshot(wallet,engine,client,protocolFees));
       }
       if(action==='intent'&&worker&&req.method==='POST'){
         const v=await body(req);exact(v,['id','kind','amountWei','expiresAt']);
