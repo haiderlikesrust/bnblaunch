@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./qi.css";
 
 export const metadata: Metadata = {
-  title: "SHEN · The Agent Launchpad",
-  description: "Tokens with a mind of their own. Launch on BNB, powered by Flap.",
+  title: "QI 启 · The Agent Launchpad",
+  description: "Launch a token. Awaken its agent. On BNB, powered by Flap.",
   icons: {
-    icon: "/shen-symbol.png",
-    shortcut: "/shen-symbol.png",
+    icon: "/favicon.svg",
+    shortcut: "/qi-symbol.svg",
   },
 };
 

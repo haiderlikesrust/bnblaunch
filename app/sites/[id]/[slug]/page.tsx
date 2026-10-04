@@ -18,7 +18,7 @@ export default async function KnowledgePage({params}:Props){
   {page?<article className="as-knowledge"><p className="as-kicker">{coin.symbol} / {zh?'知识库':'KNOWLEDGE LIBRARY'}</p><h1>{page.title}</h1><p>{page.summary}</p><div className="as-page-body">{page.body}</div>
    {page.sources.length>0&&<aside><h2>{zh?'来源':'Sources'}</h2><ul>{page.sources.map(s=><li key={s.url}><a href={s.url} target="_blank" rel="noreferrer">{s.title}</a></li>)}</ul></aside>}
    <p>{zh?'网站版本':'Website revision'} {site.revision} · {new Date(site.publishedAt).toISOString().slice(0,10)}</p>
-  </article>:<section className="as-knowledge"><h1>{zh?'网站反馈':'Website feedback'}</h1><p>{zh?'登录 SHEN 钱包后即可反馈。':'Sign in with your wallet on SHEN to leave feedback.'}</p></section>}
+  </article>:<section className="as-knowledge"><h1>{zh?'网站反馈':'Website feedback'}</h1><p>{zh?'登录 QI 钱包后即可反馈。':'Sign in with your wallet on QI to leave feedback.'}</p></section>}
   <SiteFeedback coinId={id} target={page?.slug??'home'} zh={zh}/>
  </main>;
 }

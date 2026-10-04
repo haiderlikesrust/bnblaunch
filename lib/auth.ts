@@ -22,7 +22,7 @@ export async function challenge(wallet:string,origin:string){
   if(!isAddress(wallet))throw new AppError(400,"Invalid wallet address");
   const id=crypto.randomUUID(),now=Date.now(),expiresAt=now+300000,address=wallet.toLowerCase();
   // EIP-4361 uses the checksummed address; strict wallets verify the domain line.
-  const message=[`${new URL(origin).host} wants you to sign in with your Ethereum account:`,getAddress(wallet),"","Sign in to SHEN. This does not authorize a transaction.","",`URI: ${origin}`,"Version: 1","Chain ID: 56",`Nonce: ${id.replaceAll('-','')}`,`Issued At: ${new Date(now).toISOString()}`,`Expiration Time: ${new Date(expiresAt).toISOString()}`].join("\n");
+  const message=[`${new URL(origin).host} wants you to sign in with your Ethereum account:`,getAddress(wallet),"","Sign in to QI. This does not authorize a transaction.","",`URI: ${origin}`,"Version: 1","Chain ID: 56",`Nonce: ${id.replaceAll('-','')}`,`Issued At: ${new Date(now).toISOString()}`,`Expiration Time: ${new Date(expiresAt).toISOString()}`].join("\n");
   // Expired rows are purged, and a wallet's oldest pending challenge is evicted
   // instead of refusing, so nobody can lock another wallet out of signing in.
   await database().batch([

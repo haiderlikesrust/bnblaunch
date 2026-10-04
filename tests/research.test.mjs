@@ -86,7 +86,7 @@ test('public platform configuration publishes only a valid contract and the offi
    env.SHEN_TOKEN_ADDRESS=invalid;assert.equal((await platformGET().json()).shenTokenAddress,null);
   }
   env.SHEN_TOKEN_ADDRESS='0x1111111111111111111111111111111111117777';
-  assert.deepEqual(await platformGET().json(),{shenTokenAddress:env.SHEN_TOKEN_ADDRESS,xUrl:'https://x.com/shendotnow',influencer:{available:false,dailyPosts:6,videos:false}});
+  assert.deepEqual(await platformGET().json(),{shenTokenAddress:env.SHEN_TOKEN_ADDRESS,xUrl:'https://x.com/qidotnow',influencer:{available:false,dailyPosts:6,videos:false}});
  }finally{delete env.SHEN_TOKEN_ADDRESS;delete env.OPENROUTER_API_KEY;}
 });
 

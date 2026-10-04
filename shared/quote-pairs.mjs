@@ -17,7 +17,7 @@ export async function quoteTokenInfo(client,address,eligibility=true){
  if(sameAddress(address,WBNB))throw Error('Choose native BNB instead of WBNB for the launch pair.');
  const config=eligibility?await client.readContract({address:PORTAL,abi:quoteConfigAbi,functionName:'getQuoteTokenConfiguration',args:[address]}):{enabled:1,dexId:0};
  if(config.enabled!==1)throw Error('Flap has not enabled this quote token.');
- if(config.dexId!==0)throw Error('This quote token requires a DEX route SHEN does not support yet.');
+ if(config.dexId!==0)throw Error('This quote token requires a DEX route QI does not support yet.');
  const [symbol,name,decimals]=await Promise.all(['symbol','name','decimals'].map(functionName=>client.readContract({address,abi:erc20QuoteAbi,functionName})));
  if(typeof symbol!=='string'||symbol.length>40||typeof name!=='string'||name.length>120||!Number.isInteger(decimals)||decimals<0||decimals>36)throw Error('Quote token metadata is invalid.');
  return {address:address.toLowerCase(),symbol,name,decimals,dexId:config.dexId};

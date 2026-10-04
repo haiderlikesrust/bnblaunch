@@ -20,6 +20,6 @@ export async function POST(request:Request){try{
   ...(input.influencer?[db().prepare("INSERT INTO influencers(coin_id,config,status,created_at,updated_at) SELECT ?,?,'pending_launch',?,? WHERE EXISTS(SELECT 1 FROM coins WHERE id=?)").bind(id,JSON.stringify(input.influencer),Date.now(),Date.now(),id)]:[]),
  ]);
  if(!results[0].meta.changes)throw new AppError(429,"Too many unfinished launches from this wallet today. Finish one from My agents or try again tomorrow.");
- await eventStatement(coin,owner,"Launch started. 85% of distributable fees fund the agent, with service costs paid first; 15% fund system SHEN buybacks and burns.").run();
+ await eventStatement(coin,owner,"Launch started. 85% of distributable fees fund the agent, with service costs paid first; 15% fund system QI buybacks and burns.").run();
  return response({coin},201)
 }catch(e){return failure(e)}}

@@ -10,7 +10,7 @@ export type LaunchStatus={launched:boolean;pending:{planId:string;hash:string;st
 export class LaunchFlowError extends Error{readonly code:string;readonly status:number;constructor(message:string,code="",status=0){super(message);this.code=code;this.status=status;}}
 const BSC={chainId:"0x38",chainName:"BNB Smart Chain",nativeCurrency:{name:"BNB",symbol:"BNB",decimals:18},rpcUrls:["https://bsc-dataseed.bnbchain.org"],blockExplorerUrls:["https://bscscan.com"]};
 const wait=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
-function provider(){if(!window.ethereum)throw new LaunchFlowError("Open SHEN in a browser with a BNB-compatible wallet such as MetaMask or Rabby.");return window.ethereum;}
+function provider(){if(!window.ethereum)throw new LaunchFlowError("Open QI in a browser with a BNB-compatible wallet such as MetaMask or Rabby.");return window.ethereum;}
 async function launchApi<T>(coinId:string,data:unknown):Promise<T>{
  const r=await fetch(`/api/coins/${encodeURIComponent(coinId)}/launch`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
  const value=await r.json().catch(()=>({})) as {error?:string;code?:string};

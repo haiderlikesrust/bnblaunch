@@ -49,7 +49,7 @@ export function createDomainHosting(input:HostingConfig,dependencies:Dependencie
  }
  function matchRoute(value:unknown,domain:string):Route{
   const route=value as Route;
-  if(!route||typeof route!=='object'||typeof route.domainId!=='string'||!route.domainId||route.host!==domain||route.composeId!==config.composeId||route.serviceName!=='gateway'||route.port!==3187||route.path!=='/'||route.https!==true||route.certificateType!=='letsencrypt'||route.domainType!=='compose'||(route.internalPath??'/')!=='/'||(route.stripPath!==undefined&&route.stripPath!==false)||(route.enabled!==undefined&&route.enabled!==true)||(route.forwardAuthEnabled!==undefined&&route.forwardAuthEnabled!==false)||(route.middlewares!=null&&(!Array.isArray(route.middlewares)||route.middlewares.length>0))||route.applicationId||route.previewDeploymentId||route.customCertResolver||route.customEntrypoint)throw new HostingError('route_conflict','An existing domain route does not match SHEN hosting. No route was changed.');
+  if(!route||typeof route!=='object'||typeof route.domainId!=='string'||!route.domainId||route.host!==domain||route.composeId!==config.composeId||route.serviceName!=='gateway'||route.port!==3187||route.path!=='/'||route.https!==true||route.certificateType!=='letsencrypt'||route.domainType!=='compose'||(route.internalPath??'/')!=='/'||(route.stripPath!==undefined&&route.stripPath!==false)||(route.enabled!==undefined&&route.enabled!==true)||(route.forwardAuthEnabled!==undefined&&route.forwardAuthEnabled!==false)||(route.middlewares!=null&&(!Array.isArray(route.middlewares)||route.middlewares.length>0))||route.applicationId||route.previewDeploymentId||route.customCertResolver||route.customEntrypoint)throw new HostingError('route_conflict','An existing domain route does not match QI hosting. No route was changed.');
   return route;
  }
  async function findRoute(domainInput:string){
@@ -91,7 +91,7 @@ export function createDomainHosting(input:HostingConfig,dependencies:Dependencie
    const resolver=dns?new dns.Resolver({timeout:4000,tries:2}):null;
    const resolve4=dependencies.resolve4??((host:string)=>resolver!.resolve4(host)),resolve6=dependencies.resolve6??((host:string)=>resolver!.resolve6(host));
    const [addresses,ipv6]=await Promise.all([resolve4(domain),resolve6(domain).catch((error:unknown)=>{if(error&&typeof error==='object'&&'code' in error&&['ENODATA','ENOTFOUND'].includes(String(error.code)))return [];throw error;})]);
-   if(!addresses.length||addresses.some(ip=>ip!==config.ipv4)||ipv6.length)return {live:false as const,reason:'DNS is not yet exclusively pointing to the SHEN hosting server.'};
+   if(!addresses.length||addresses.some(ip=>ip!==config.ipv4)||ipv6.length)return {live:false as const,reason:'DNS is not yet exclusively pointing to the QI hosting server.'};
    const request=dependencies.requestHttps??pinnedHttpsRequest;
    const proof=await request({domain,ipv4:config.ipv4,path:'/.well-known/shen-site',maxBytes:4096});
    if(proof.status!==200||!/^application\/json(?:;|$)/i.test(proof.contentType))return {live:false as const,reason:'The domain verification endpoint is not ready over HTTPS.'};

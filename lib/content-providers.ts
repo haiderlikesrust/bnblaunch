@@ -23,7 +23,7 @@ export async function availableImageQuote(model=IMAGE_MODEL,transport:Fetcher=fe
  throw new ProviderFailure(false,0);
 }
 export async function generateImage(apiKey:string,quote:ImageQuote,prompt:string,transport:Fetcher=fetch){
- let r:Response;try{r=await transport('https://openrouter.ai/api/v1/images',{method:'POST',headers:{Authorization:'Bearer '+apiKey,'Content-Type':'application/json','X-Title':'SHEN community artwork'},body:JSON.stringify({model:quote.model,prompt,n:1,resolution:imageResolution(quote.model),aspect_ratio:'1:1',provider:{only:[quote.provider],allow_fallbacks:false}}),redirect:'error',signal:AbortSignal.timeout(120000)});}catch{throw new ProviderFailure()}
+ let r:Response;try{r=await transport('https://openrouter.ai/api/v1/images',{method:'POST',headers:{Authorization:'Bearer '+apiKey,'Content-Type':'application/json','X-Title':'QI community artwork'},body:JSON.stringify({model:quote.model,prompt,n:1,resolution:imageResolution(quote.model),aspect_ratio:'1:1',provider:{only:[quote.provider],allow_fallbacks:false}}),redirect:'error',signal:AbortSignal.timeout(120000)});}catch{throw new ProviderFailure()}
  // Image API billing is all-or-nothing. A received 400 rejects the request;
  // a received 502 reports failed generation. Neither produced a billed image.
  // Transport timeouts and unrecognized responses still require reconciliation.

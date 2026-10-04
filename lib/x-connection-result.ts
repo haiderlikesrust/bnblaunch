@@ -19,7 +19,7 @@ export const X_CONNECTION_ERRORS={
  x_unavailable:['X 暂时无法访问。请稍后重新发起连接。','X could not be reached or returned an unexpected response. Start a fresh connection shortly.'],
  account_mismatch:['此代币已绑定其他 X 账号。请重新连接原账号。','This coin is already bound to another X account. Reconnect the original account.'],
  account_in_use:['此 X 账号已绑定其他代币。请选择本代币专用账号。','This X account is already bound to another coin. Use an account dedicated to this coin.'],
- server_error:['SHEN 无法安全保存 X 连接。平台需检查服务日志和凭据加密配置。','SHEN could not securely save the X connection. The platform must check its service logs and credential-encryption configuration.'],
+ server_error:['QI 无法安全保存 X 连接。平台需检查服务日志和凭据加密配置。','QI could not securely save the X connection. The platform must check its service logs and credential-encryption configuration.'],
 } as const;
 export type XConnectionCode=keyof typeof X_CONNECTION_ERRORS;
 export function xConnectionCode(value:unknown):XConnectionCode{return typeof value==='string'&&Object.hasOwn(X_CONNECTION_ERRORS,value)?value as XConnectionCode:'connection_failed'}

@@ -93,7 +93,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
       const quote=await quoteTokenInfo(client,coin.quoteToken??zeroAddress);
       if(!sameAddress(quote.address,zeroAddress))await findConversionRoute(client,quote.address,10n**BigInt(quote.decimals));
       const configHash=keccak256(toHex(row.config)),buyWei=parseQuoteBuy(v.initialBuyBnb,quote.decimals);
-      const message=["SHEN launch authorization",`Origin: ${requestOrigin(request)}`,"Chain ID: 56",`Coin: ${coin.id}`,`Creator: ${v.creator.toLowerCase()}`,`Agent wallet: ${treasury.toLowerCase()}`,`Configuration: ${configHash}`,`Pair token: ${quote.symbol} (${quote.address})`,`Developer buy: ${formatUnits(buyWei,quote.decimals)} ${quote.symbol}`,`Coin tweet: ${v.tweetUrl||"None"}`,`Nonce: ${id}`,`Expires: ${new Date(expiresAt).toISOString()}`,"The agent signs its own permitted transactions. After launch, the developer cannot pause or resume it. This message authorizes launch preparation only."].join("\n");
+      const message=["QI launch authorization",`Origin: ${requestOrigin(request)}`,"Chain ID: 56",`Coin: ${coin.id}`,`Creator: ${v.creator.toLowerCase()}`,`Agent wallet: ${treasury.toLowerCase()}`,`Configuration: ${configHash}`,`Pair token: ${quote.symbol} (${quote.address})`,`Developer buy: ${formatUnits(buyWei,quote.decimals)} ${quote.symbol}`,`Coin tweet: ${v.tweetUrl||"None"}`,`Nonce: ${id}`,`Expires: ${new Date(expiresAt).toISOString()}`,"The agent signs its own permitted transactions. After launch, the developer cannot pause or resume it. This message authorizes launch preparation only."].join("\n");
       await db().prepare("INSERT INTO launch_authorizations(id,coin_id,creator,treasury,message,config_hash,expires_at,initial_buy_wei,tweet_url,quote_token,quote_decimals) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(id,coin.id,v.creator.toLowerCase(),treasury.toLowerCase(),message,configHash,expiresAt,buyWei.toString(),v.tweetUrl,quote.address,quote.decimals).run();
       const approvals:Record<string,string>[]=[];
       if(!sameAddress(quote.address,zeroAddress)&&buyWei>0n){
@@ -104,7 +104,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
     }
     const auth=await db().prepare("SELECT * FROM launch_authorizations WHERE id=? AND coin_id=?").bind(v.authorizationId,coin.id).first<{creator:string;treasury:string;message:string;config_hash:string;expires_at:number;used_at:number|null;initial_buy_wei:string;tweet_url:string;quote_token:string;quote_decimals:number;metadata_cid:string|null}>();
     if(!auth||auth.expires_at<Date.now()||auth.config_hash!==keccak256(toHex(row.config)))throw new AppError(409,"Launch authorization expired or the plan changed. Prepare again.");
-    // Only metadata SHEN pinned for this authorization may be launched.
+    // Only metadata QI pinned for this authorization may be launched.
     if(!auth.metadata_cid||auth.metadata_cid!==v.cid)throw new AppError(409,"Launch metadata does not match this authorization. Validate the launch again.");
     if(!await verifyMessage({address:auth.creator as Address,message:auth.message,signature:v.signature as Hex}))throw new AppError(403,"Wallet authorization could not be verified.");
     const treasury=await agentWallet(coin.id);

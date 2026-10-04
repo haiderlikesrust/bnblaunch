@@ -30,7 +30,7 @@ export function customHostRoute(pathname,coinId) {
  if(typeof pathname!=='string'||typeof coinId!=='string'||!/^[-a-zA-Z0-9_]{1,100}$/.test(coinId)||/[\\%?#\u0000-\u0020]/.test(pathname)||pathname.includes('//')||pathname.split('/').some(p=>p==='.'||p==='..'))return 'blocked';
  if(pathname==='/'||pathname===`/sites/${coinId}`)return 'site';
  if(pathname==='/.well-known/shen-site')return 'verification';
- if(/^\/(?:assets|_next\/static|fonts|models)\/[a-zA-Z0-9_./-]+$/.test(pathname)||pathname==='/favicon.ico'||pathname==='/shen-symbol.png')return 'asset';
+ if(/^\/(?:assets|_next\/static|fonts|models)\/[a-zA-Z0-9_./-]+$/.test(pathname)||pathname==='/favicon.ico'||pathname==='/shen-symbol.png'||pathname==='/qi-symbol.svg'||pathname==='/favicon.svg')return 'asset';
  if(pathname===`/api/coins/${coinId}/image`||new RegExp(`^/api/coins/${coinId}/publications/[-a-zA-Z0-9_:]{1,150}/image$`).test(pathname))return 'asset';
  return 'blocked';
 }

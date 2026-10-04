@@ -21,7 +21,7 @@ export default function InfluencerPanel({coinId,canManage,t}:{coinId:string;canM
   training:["dormant",t("正在训练","Training identity"),t("正在训练角色身份，让每条内容都是同一个角色…","Training the character's identity so every post stays the same character…")],
   active:["active",t("在线","Live"),value.xUsername?t(`正在以 @${value.xUsername} 的身份在 X 发布。`,`Posting on X as @${value.xUsername}.`):t("正在 X 发布。","Posting on X.")],
   failed:["paused",t("设计失败","Design failed"),value.notice??t("角色设计未能完成。","The character design could not complete.")],
-  unavailable:["paused",t("暂不可用","Unavailable"),t("平台尚未开启 AI 网红媒体服务。角色设定已保存。","AI influencer media isn't switched on for SHEN yet. The character is saved.")],
+  unavailable:["paused",t("暂不可用","Unavailable"),t("平台尚未开启 AI 网红媒体服务。角色设定已保存。","AI influencer media isn't switched on for QI yet. The character is saved.")],
  };
  const [tone,label,detail]=status[value.status]??status.unavailable;
  const chips=SUMMARY.map(g=>optionLabel(g,value.config[g] as string|null,t)).filter(Boolean);
