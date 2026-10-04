@@ -107,6 +107,8 @@ test('routine checks preserve a rejected plan outcome and expose the separate pl
   assert.equal((await get()).lastPlan.rejection,null);
   sql.prepare("INSERT INTO agent_memories VALUES('attempt','coin','private summary','private next steps',?)").run(now);
   const approved=await get();assert.equal(approved.state,'scheduled');assert.equal(approved.lastPlan.outcome,'approved');assert.equal(JSON.stringify(approved).includes('private'),false);
+  sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at) VALUES('held','coin','{}','uncertain',?,?)").run(now,now);
+  const held=await get();assert.equal(held.state,'scheduled');assert.equal(held.publicationNeedsVerification,true);
  }finally{sql.close();}
 });
 

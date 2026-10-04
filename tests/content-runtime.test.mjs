@@ -17,7 +17,7 @@ function fixture(){
  let generations=0,posts=0,uploads=0,postText='',postMedia=null,postAt=0,missingCost=false,losePost=false,readAuthor='123';
  globalThis.fetch=async(url,init={})=>{
   const u=String(url);
-  if(u.includes('/images/models/'))return json({endpoints:[{provider_tag:'seed',supported_parameters:{resolution:{values:['1K']},aspect_ratio:{values:['1:1']}},pricing:[{billable:'output_image',unit:'image',cost_usd:.04}]}]});
+  if(u.includes('/images/models/'))return json({endpoints:[{provider_tag:'seed',supported_parameters:{resolution:{values:['1K','2K']},aspect_ratio:{values:['1:1']}},pricing:[{billable:'output_image',unit:'image',cost_usd:.04}]}]});
   if(u.endsWith('/v1/images')){generations++;return json({data:[{b64_json:readFileSync('public/shen-symbol.png').toString('base64'),media_type:'image/png'}],...(missingCost?{}:{usage:{cost:.04}})});}
   if(u.endsWith('/2/usage/credits'))return json({data:{total_balance:100}});
   if(u.endsWith('/2/media/upload')){uploads++;return json({data:{id:'777'}});}
@@ -44,6 +44,17 @@ test('lost X acknowledgement is reconciled by exact account and content without 
 });
 test('unknown image cost holds the reservation and never regenerates or publishes',async()=>{
  const f=fixture();try{f.coin('coin');f.job('job','coin','gallery');f.missingCost();for(let i=0;i<5;i++)await runContentTick();assert.deepEqual(f.counts,{generations:1,uploads:0,posts:0});assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'uncertain');assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');}finally{f.close()}
+});
+
+test('a confirmed image rejection publishes gallery text once and releases unused credit',async()=>{
+ const f=fixture();try{
+  f.coin('coin');f.job('job','coin','gallery');const provider=globalThis.fetch;let images=0;
+  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/v1/images')){images++;assert.equal(JSON.parse(init.body).resolution,'2K');return new Response('invalid request',{status:400});}return provider(url,init);};
+  for(let i=0;i<5;i++)await runContentTick();
+  const job=f.sql.prepare('SELECT * FROM content_jobs').get();assert.equal(job.status,'complete');assert.equal(JSON.parse(job.payload).imagePrompt,null);assert.equal(JSON.parse(job.payload).text,'A verified community update.');
+  assert.equal(images,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd credit FROM coins').get().credit,1000000);assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'settled');
+  assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM events').get().n,1);assert.match(f.sql.prepare('SELECT message FROM events').get().message,/without artwork/);
+ }finally{f.close();}
 });
 test('a coin without credit does not starve another gallery job; gallery settlement survives restart',async()=>{
  const f=fixture();try{f.coin('poor',0);f.coin('funded');f.job('a','poor','gallery');f.job('b','funded','gallery');await runContentTick();await runContentTick();await runContentTick();f.sql.exec("UPDATE content_jobs SET status='media_ready',next_attempt_at=0 WHERE id='b'");await runContentTick();assert.equal(f.sql.prepare("SELECT status FROM content_jobs WHERE id='b'").get().status,'complete');assert.equal(f.counts.generations,1);assert.equal(f.counts.posts,0);}finally{f.close()}

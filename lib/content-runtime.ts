@@ -15,10 +15,10 @@ export function contentJobStatement(lease:{coinId:string;id:string},id:string,pu
  AND (SELECT COUNT(*) FROM content_jobs WHERE coin_id=? AND created_at>?)<8
  AND NOT EXISTS(SELECT 1 FROM content_jobs WHERE coin_id=? AND payload=? AND created_at>?)`)
  .bind(id,lease.coinId,JSON.stringify(publication),now,now,lease.coinId,lease.id,now,lease.coinId,lease.coinId,now-3600000,lease.coinId,now-86400000,lease.coinId,JSON.stringify(publication),now-86400000);}
-export async function contentSnapshot(coin:Coin){const [account,jobs]=await Promise.all([xAccount(coin.id),db().prepare('SELECT id,payload,status,tweet_id,created_at FROM content_jobs WHERE coin_id=? ORDER BY created_at DESC LIMIT 5').bind(coin.id).all<{id:string;payload:string;status:string;tweet_id:string|null;created_at:number}>()]);return {xConnected:xConnected(account),canPostImages:xMediaConfigured(),xUsername:account?.username??null,recent:jobs.results.map(j=>({id:j.id,publication:JSON.parse(j.payload),status:j.status,tweetId:j.tweet_id,createdAt:j.created_at}))};}
+export async function contentSnapshot(coin:Coin){const [account,jobs]=await Promise.all([xAccount(coin.id),db().prepare('SELECT id,payload,status,tweet_id,created_at FROM content_jobs WHERE coin_id=? ORDER BY created_at DESC LIMIT 5').bind(coin.id).all<{id:string;payload:string;status:string;tweet_id:string|null;created_at:number}>()]);return {publicationPending:jobs.results.some(j=>!['complete','failed'].includes(j.status)),xConnected:xConnected(account),canPostImages:xMediaConfigured(),xUsername:account?.username??null,recent:jobs.results.map(j=>({id:j.id,publication:JSON.parse(j.payload),status:j.status,tweetId:j.tweet_id,createdAt:j.created_at}))};}
 export async function contentCapabilities(){const value:string[]=[];if(xConfigured())try{if(await xProvider(env.X_API_BEARER_TOKEN!).balance()>xCosts().post+xCosts().upload+xCosts().read*3)value.push('x-publishing')}catch{}if(env.OPENROUTER_API_KEY)try{await imageQuote(env.OPENROUTER_IMAGE_MODEL||IMAGE_MODEL);value.push('image-publishing')}catch{}return value;}
 async function claim(job:Job,status:string){const version=Math.max(Date.now(),job.updated_at+1);const r=await db().prepare('UPDATE content_jobs SET status=?,updated_at=? WHERE id=? AND status=? AND updated_at=?').bind(status,version,job.id,job.status,job.updated_at).run();if(r.meta.changes){job.status=status;job.updated_at=version;return true}return false;}
-async function finish(job:Job,status:'complete'|'failed',cost:number,message:string,tweetId:string|null=null){
+async function finish(job:Job,status:'complete'|'failed',cost:number,message:string,tweetId:string|null=null,fallback:Publication|null=null){
  if(!Number.isSafeInteger(cost)||cost<0||cost>job.reserved_microusd)throw new ProviderFailure();
  // The job state/version fences every write in this transaction. A delayed
  // expiry or gallery turn must never refund a job another turn is publishing.
@@ -26,7 +26,7 @@ async function finish(job:Job,status:'complete'|'failed',cost:number,message:str
  await db().batch([
   db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd+? WHERE id=? AND EXISTS(SELECT 1 FROM agent_runs WHERE id=? AND status='reserved') AND "+fence).bind(job.reserved_microusd-cost,job.coin_id,'content:'+job.id,job.id,job.status,job.updated_at),
   db().prepare("UPDATE agent_runs SET status='settled',cost_microusd=?,output=?,finished_at=? WHERE id=? AND status='reserved' AND "+fence).bind(cost,message,new Date().toISOString(),'content:'+job.id,job.id,job.status,job.updated_at),
-  db().prepare('UPDATE content_jobs SET status=?,cost_microusd=?,tweet_id=COALESCE(?,tweet_id),updated_at=? WHERE id=? AND status=? AND updated_at=?').bind(status,cost,tweetId,version,job.id,job.status,job.updated_at),
+  db().prepare('UPDATE content_jobs SET status=?,cost_microusd=?,tweet_id=COALESCE(?,tweet_id),payload=COALESCE(?,payload),updated_at=? WHERE id=? AND status=? AND updated_at=?').bind(status,cost,tweetId,fallback?JSON.stringify(fallback):null,version,job.id,job.status,job.updated_at),
   db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,id,owner,json_extract(config,'$.name'),?,? FROM coins WHERE id=? AND "+fence+" ON CONFLICT(id) DO NOTHING").bind('content-result:'+job.id,message,new Date().toISOString(),job.coin_id,job.id,status,version),
  ]);
 }
@@ -107,10 +107,14 @@ export async function runContentTick(){
    await finish(job,'complete',job.cost_microusd+costs.post,'Published on X: https://x.com/i/status/'+tweetId,tweetId);return {processed:true};
   }
  }catch(e){
+  if(e instanceof ProviderFailure)console.warn(`Community provider result [${e.httpStatus===null?'unverified':`HTTP ${e.httpStatus}`}]: ${e.uncertain?'verification required':'confirmed failure'}.`);
   if(e instanceof XAccessRevoked&&activeXAccount)await revokeXSession(activeXAccount);
   const current=await db().prepare('SELECT * FROM content_jobs WHERE id=?').bind(job.id).first<Job>();
   if(current&&['generating','uploading','posting','reconciling'].includes(current.status)){
-   if(e instanceof ProviderFailure&&!e.uncertain&&e.cost!==null&&current.status==='generating')await finish(current,'failed',current.cost_microusd+e.cost,'Image generation could not complete. Known service costs were recorded.');
+   if(e instanceof ProviderFailure&&!e.uncertain&&e.cost!==null&&current.status==='generating'){
+    if(publication.destination==='gallery')await finish(current,'complete',current.cost_microusd+e.cost,'Published the approved community text without artwork after image generation failed.',null,{...publication,imagePrompt:null,altText:''});
+    else await finish(current,'failed',current.cost_microusd+e.cost,e.httpStatus===400?'Artwork request rejected (HTTP 400). No image charge was recorded.':'Image generation could not complete. Known service costs were recorded.');
+   }
    else await db().batch([
     db().prepare("UPDATE content_jobs SET attempts=CASE WHEN status='reconciling' THEN 3 ELSE attempts END,status='uncertain',updated_at=? WHERE id=?").bind(Date.now(),job.id),
     db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,id,owner,json_extract(config,'$.name'),'A publishing result is awaiting verification. No duplicate post will be sent.',? FROM coins WHERE id=? ON CONFLICT(id) DO NOTHING").bind('content-review:'+job.id,new Date().toISOString(),job.coin_id),

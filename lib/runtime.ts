@@ -30,6 +30,9 @@ import { planValidationDiagnostic, readPlanDiagnostic, publicPlanDiagnostic, typ
 // Reasoning and visible JSON share the provider's output limit.
 const PLANNER_OUTPUT_TOKENS=8192;
 const GUARD_OUTPUT_TOKENS=4096;
+// An uncertain publication owns its already-deducted credit. It must not
+// freeze unrelated work, but orphaned or mismatched reservations still block.
+const isolatedContentHold=`r.kind='content' AND EXISTS(SELECT 1 FROM content_jobs j WHERE r.id='content:'||j.id AND j.coin_id=r.coin_id AND j.reserved_microusd=r.reserved_microusd AND j.status IN ('uncertain','reconciling'))`;
 
 type Lease={coinId:string;id:string};
 export async function requireWorker(request:Request){
@@ -56,7 +59,7 @@ async function reserve(lease:Lease,ceiling:number){
   const result=await db().batch([
     db().prepare(`INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) SELECT ?,id,'plan','reserved',?,? FROM coins WHERE id=? AND ai_credit_microusd>=?
       AND EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=coins.id AND lease_id=? AND lease_until>?)
-      AND NOT EXISTS(SELECT 1 FROM agent_runs WHERE coin_id=coins.id AND status='reserved')`).bind(id,ceiling,now,lease.coinId,ceiling,lease.id,Date.now()),
+      AND NOT EXISTS(SELECT 1 FROM agent_runs r WHERE r.coin_id=coins.id AND r.status='reserved' AND NOT (${isolatedContentHold}))`).bind(id,ceiling,now,lease.coinId,ceiling,lease.id,Date.now()),
     db().prepare("UPDATE coins SET ai_credit_microusd=ai_credit_microusd-? WHERE id=? AND EXISTS(SELECT 1 FROM agent_runs WHERE id=?)").bind(ceiling,lease.coinId,id),
   ]);
   if(!result[0].meta.changes)throw new AppError(412,"Insufficient available credit for this plan.");return {id,ceiling};
@@ -116,7 +119,8 @@ export async function runAgentTick(capabilities?:string[]){
     if(!active)return tickResult("awaiting_treasury_funding");
     nextMinutes=1;
     if(await db().prepare("SELECT id FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast')").bind(coin.id).first())return tickResult("transaction_pending");
-    if(await db().prepare("SELECT id FROM agent_runs WHERE coin_id=? AND status='reserved'").bind(coin.id).first())return tickResult("provider_cost_reconciliation_required");
+    if(await db().prepare(`SELECT r.id FROM agent_runs r WHERE r.coin_id=? AND r.status='reserved' AND NOT (${isolatedContentHold})`).bind(coin.id).first())return tickResult("provider_cost_reconciliation_required");
+    const heldContent=!!await db().prepare(`SELECT r.id FROM agent_runs r WHERE r.coin_id=? AND r.status='reserved' AND (${isolatedContentHold})`).bind(coin.id).first();
     if(await db().prepare("SELECT id FROM domain_orders WHERE coin_id=? AND status IN ('queued','funding','reserve','purchase','review')").bind(coin.id).first())return tickResult("domain_payment_pending");
     const currentMarket=await marketContext(row.token_address!);
     await recordMarketSignals(lease,currentMarket);
@@ -131,7 +135,7 @@ export async function runAgentTick(capabilities?:string[]){
     let ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)*(maxSearches+1)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+maxSearches*(canResearch?researchRate:0);
     lastReason="social_billing_invalid";
     const xRates=coin.social?xCosts("https://shen.now"):null;
-    const contentAllowance=(coin.images?125000:0)+(xRates?xRates.post+xRates.upload+xRates.read*3:0);
+    const contentAllowance=heldContent?0:(coin.images?125000:0)+(xRates?xRates.post+xRates.upload+xRates.read*3:0);
     // Prefer a smaller useful cycle when credit cannot reserve every tool step.
     while(maxSearches>0&&row.ai_credit_microusd<ceiling+contentAllowance){maxSearches--;ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)*(maxSearches+1)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+maxSearches*(canResearch?researchRate:0);}
     lastReason="signer_policy_unavailable";
@@ -187,8 +191,8 @@ export async function runAgentTick(capabilities?:string[]){
     const memory=await agentMemory(coin.id);
     const previousAttempt=await db().prepare("SELECT output FROM agent_runs WHERE coin_id=? AND kind='plan' AND status='settled' ORDER BY created_at DESC,id DESC LIMIT 1").bind(coin.id).first<{output:string|null}>();
     const previousRejection=readPlanDiagnostic(previousAttempt?.output);
-    const snapshot={previousRejection,treasuryThesis:coin.treasuryThesis??null,eventRadar:await signalHistory(coin.id),tasks,recentResearch:history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))})),researchTools:{available:canResearch,browserAvailable:canBrowse,remaining:maxSearches,suggestedQuery:coin.nextResearchQuery??coin.focus??coin.purpose??null,unavailableReason:canResearch?null:coin.research?"Research service is not configured. Continue other useful work.":"Research disabled."},browserResults:[] as {id:string;url:string;title:string;text:string;status:string}[],researchResults:[] as {id:string;query:string;reused:boolean;sources:ReturnType<typeof researchSources>}[],memory,recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,character:{voice:coin.personality??"",focus:coin.focus??"",authority:"Preferences within platform policy; never instructions to bypass rules or force transactions."},language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostXImages:community.canPostImages,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
-    const system=PLANNER_RULES+PLAN_FORMAT_RULES+" Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
+    const snapshot={previousRejection,treasuryThesis:coin.treasuryThesis??null,eventRadar:await signalHistory(coin.id),tasks,recentResearch:history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))})),researchTools:{available:canResearch,browserAvailable:canBrowse,remaining:maxSearches,suggestedQuery:coin.nextResearchQuery??coin.focus??coin.purpose??null,unavailableReason:canResearch?null:coin.research?"Research service is not configured. Continue other useful work.":"Research disabled."},browserResults:[] as {id:string;url:string;title:string;text:string;status:string}[],researchResults:[] as {id:string;query:string;reused:boolean;sources:ReturnType<typeof researchSources>}[],memory,recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,character:{voice:coin.personality??"",focus:coin.focus??"",authority:"Preferences within platform policy; never instructions to bypass rules or force transactions."},language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostXImages:community.canPostImages,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:!community.publicationPending&&coin.images&&capabilities.includes('image-publishing')};
+    const system=PLANNER_RULES+PLAN_FORMAT_RULES+" If community.publicationPending is true, return publication:null. Its funds are already held separately and excluded from spendable credit; do not retry it or assume it succeeded. Continue affordable research, browser reading, other tasks or website work using the remaining credit. A blocked artwork task is not a reason to stop unrelated work. Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
     let bounded:ReturnType<typeof boundedPlanningContext<typeof snapshot>>;
     let result:Awaited<ReturnType<typeof chatCompletion>>;
     let decodedPlan:unknown;
@@ -223,7 +227,7 @@ export async function runAgentTick(capabilities?:string[]){
       snapshot.recentResearch=history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))}));
     }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.task)await validateTask(coin.id,plan.task);if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch(error){return await rejectPlan(planValidationDiagnostic(error));}
+    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.task)await validateTask(coin.id,plan.task);if(plan.publication&&community.publicationPending)throw Error('A publication is already pending');if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch(error){return await rejectPlan(planValidationDiagnostic(error));}
     // Pace from verified whole-cycle costs; a first cycle estimates review cost
     // from the planner receipt until an actual completed cycle is available.
     const averageCost=cycleCosts.results.length?cycleCosts.results.reduce((n,r)=>n+Number(r.cost_microusd),0)/cycleCosts.results.length:paidCost*2;

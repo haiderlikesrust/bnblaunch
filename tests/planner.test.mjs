@@ -330,6 +330,32 @@ test('community deployment wakes long approved waits but preserves reserved work
 
 const {pulseMinutes,treasuryThesis}=await import('../lib/agent-work-policy.ts');
 const task={id:null,goal:'Publish an introduction to our mission',nextStep:'Create a useful local community introduction',status:'active',evidence:null};
+
+function holdImage(f){
+ const publication={destination:'gallery',text:'An introduction',imagePrompt:'Original Mars art',altText:'Mars'};
+ f.sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,reserved_microusd,created_at,updated_at) VALUES('held','coin',?,'uncertain',50000,?,?)").run(JSON.stringify(publication),Date.now(),Date.now());
+ f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('content:held','coin','content','reserved',50000,?)").run(new Date().toISOString());
+ f.sql.exec('UPDATE coins SET ai_credit_microusd=ai_credit_microusd-50000');
+}
+test('an unresolved image keeps its credit hold while paid research and planning continue',async()=>{
+ const f=fixture();let searches=0,step=0;env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';
+ globalThis.__plannerResearch=async()=>{searches++;return [{title:'Mars',url:'https://science.nasa.gov/mars/',description:'Science source.'}]};
+ try{
+  holdImage(f);f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true,images:true}));
+  f.modifyReply((reply,guard)=>{if(!guard&&step++===0)reply.choices[0].message.content=JSON.stringify({tool:'research',query:'Mars science discoveries'});return reply;});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(searches,1);
+  const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.community.publicationPending,true);assert.equal(snapshot.canGenerateImages,false);
+  assert.equal(f.sql.prepare("SELECT status FROM agent_runs WHERE id='content:held'").get().status,'reserved');
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd credit FROM coins').get().credit,944700);
+  assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'uncertain');
+ }finally{delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;delete globalThis.__plannerResearch;f.close();}
+});
+for(const invalid of ['orphan','amount-mismatch'])test('an '+invalid+' content reservation still blocks spending',async()=>{
+ const f=fixture();try{holdImage(f);f.sql.exec(invalid==='orphan'?"DELETE FROM content_jobs":"UPDATE content_jobs SET reserved_microusd=1");assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');assert.equal(f.calls.length,0);}finally{f.close();}
+});
+test('continuing plans cannot queue a duplicate publication while image confirmation is pending',async()=>{
+ const f=fixture();try{holdImage(f);f.output({...plan,publication:{destination:'gallery',text:'Duplicate attempt',imagePrompt:null,altText:''}});assert.equal((await runAgentTick(['autonomous-planning'])).rejection.message.includes('A publication is already pending'),true);assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM content_jobs').get().n,1);}finally{f.close();}
+});
 test('adaptive pulse preserves a six-hour credit runway and validates public spending targets',()=>{
  assert.equal(pulseMinutes(6000000,10000),1);assert.equal(pulseMinutes(600000,10000),6);assert.equal(pulseMinutes(0,10000),360);
  assert.equal(treasuryThesis.safeParse({buyback:15,rewards:25,reserve:30,creative:30,reason:'Balance useful work with runway.'}).success,true);

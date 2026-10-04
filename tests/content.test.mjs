@@ -12,9 +12,13 @@ test('image generation pins a quoted provider and requires a valid image plus ac
  const quote=await imageQuote(undefined,async()=>json(quoteResponse));assert.equal(quote.cost,40000);assert.equal(quote.ceiling,50000);
  const png=readFileSync('public/shen-symbol.png').toString('base64');let request;
  const image=await generateImage('test-key',quote,'Original artwork',async(url,init)=>{request=JSON.parse(init.body);return json({data:[{b64_json:png,media_type:'image/png'}],usage:{cost:.04}})});
- assert.equal(image.cost,40000);assert.deepEqual(request.provider,{only:['seed'],allow_fallbacks:false});assert.equal(request.n,1);assert.equal(request.resolution,'1K');assert.equal(request.output_format,undefined);
+ assert.equal(image.cost,40000);assert.deepEqual(request.provider,{only:['seed'],allow_fallbacks:false});assert.equal(request.n,1);assert.equal(request.resolution,'2K');assert.equal(request.output_format,undefined);
  await assert.rejects(generateImage('test-key',quote,'Artwork',async()=>json({data:[{b64_json:png}]})),e=>e.uncertain&&e.cost===null);
  await assert.rejects(generateImage('test-key',quote,'Artwork',async()=>new Response('',{status:502})),e=>!e.uncertain&&e.cost===0);
+ await assert.rejects(generateImage('test-key',quote,'Artwork',async()=>new Response('private provider detail',{status:400})),e=>!e.uncertain&&e.cost===0&&e.httpStatus===400&&!e.message.includes('private'));
+ await assert.rejects(generateImage('test-key',quote,'Artwork',async()=>{throw Error('timeout')}),e=>e.uncertain&&e.cost===null);
+ await assert.rejects(generateImage('test-key',quote,'Artwork',async()=>new Response('',{status:500})),e=>e.uncertain&&e.cost===null);
+ await assert.rejects(imageQuote(undefined,async()=>json({endpoints:[{...quoteResponse.endpoints[0],supported_parameters:{resolution:{values:['1K']},aspect_ratio:{values:['1:1']}}}]})),undefined,'4.5 cannot be quoted for a 1K-only endpoint');
  await assert.rejects(imageQuote(undefined,async()=>json({endpoints:[{...quoteResponse.endpoints[0],pricing:[{billable:'output_image',unit:'token',cost_usd:.04}]}]})));
 });
 test('official X transport uses bearer tokens, multipart media and exact post payloads',async()=>{

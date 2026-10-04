@@ -27,7 +27,7 @@ export async function agentConsole(coin: Coin) {
   else if (!capable) state = 'services_unavailable';
   else if (research?.status === 'searching' && now - research.started_at < 120000) { state = 'researching'; changedAt = research.started_at; }
   else if (operation) { state = operation.kind === 'compute' ? 'funding_services' : 'transaction_pending'; changedAt = operation.created_at; }
-  else if (content) { state = ['uncertain', 'reconciling'].includes(content.status) ? 'verification_pending' : content.status === 'posting' ? 'posting' : content.status === 'generating' ? 'creating_image' : 'publication_queued'; changedAt = content.updated_at; }
+  else if (content&&!['uncertain','reconciling'].includes(content.status)) { state = content.status === 'posting' ? 'posting' : content.status === 'generating' ? 'creating_image' : 'publication_queued'; changedAt = content.updated_at; }
   else if (domain) { state = 'domain_pending'; changedAt = domain.updated_at; }
   else if (run?.status === 'reserved') { state = lease && lease.lease_until > now ? 'planning' : 'verification_pending'; changedAt = Date.parse(run.created_at); }
   else if (lease && lease.lease_until > now) state = 'checking';
@@ -40,5 +40,5 @@ export async function agentConsole(coin: Coin) {
   const diagnostic=run?.status==='settled'&&!run.approved?readPlanDiagnostic(run.output):null;
   const lastPlan=run?{outcome:run.approved?'approved':run.status==='reserved'?'pending':'not_approved',startedAt:Date.parse(run.created_at),finishedAt:run.finished_at?Date.parse(run.finished_at):null,rejection:diagnostic?publicPlanDiagnostic(diagnostic):null}:null;
   return { state, changedAt, observedAt: now,lastCheckAt:lease?.last_checked_at??null, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,nextPlanAt:lease?.next_plan_at&&lease.next_plan_at>now?lease.next_plan_at:null,lastPlan,
-    tasks,signals,moves:moves.results,treasuryThesis:config?JSON.parse(config.config).treasuryThesis??null:null,memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
+    publicationNeedsVerification:!!content&&['uncertain','reconciling'].includes(content.status),tasks,signals,moves:moves.results,treasuryThesis:config?JSON.parse(config.config).treasuryThesis??null:null,memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
 }
