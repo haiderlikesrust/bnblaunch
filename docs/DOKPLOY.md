@@ -43,7 +43,7 @@ Generate each secret separately with `openssl rand -hex 32`. Do not reuse a toke
 | `SIGNER_SLIPPAGE_BPS` | Swap slippage ceiling; template `100` = 1% |
 | `SIGNER_BUYBACKS_ENABLED` | Explicit platform enablement for buybacks; keep false until the chain routes have been validated |
 | `X_CLIENT_ID`, `X_CLIENT_SECRET` | Official X Developer Console → application → OAuth 2.0 credentials. Use a confidential Web App, Read and Write permissions, callback `https://shen.now/api/social/x/callback`. |
-| `X_API_BEARER_TOKEN` | Official X application token for the platform credit-balance check. Fund the X developer account separately and verify credit API access before enabling social launch readiness. |
+| `X_API_BEARER_TOKEN` | Official X application token for the platform credit-balance check. Fund the X developer account separately and verify credit API access before X publishing can run. |
 | `X_LOGIN_DAILY_LIMIT_MICROUSD` | Platform-funded onboarding cap; template `1000000` = $1/day, with a separate three-attempts/hour owner limit |
 | `X_POST_COST_MICROUSD`, `X_POST_URL_COST_MICROUSD` | Post reservation ceilings; defaults `15000` ($0.015) and `200000` ($0.20) for posts containing URLs. Confirm your account rates. |
 | `X_READ_COST_MICROUSD` | Ten-post reconciliation ceiling, default `50000`. Settlement accounts for returned posts at 5,000 micro-USD each. Verify your account pricing before production. |
@@ -182,3 +182,12 @@ Multipart artwork requests are now size-limited while reading the stream, before
 Security patches update Next, React/RSC, Vite and vulnerable transitive dependencies. As of this review, `npm audit --omit=dev` reports no known advisories for the application or signing-service dependency trees. The full application audit still reports 14 development-toolchain entries, rooted in braces and older esbuild versions used by lint/build/migration tooling. These were not suppressed or addressed with the audit tool's suggested breaking framework downgrades. Do not expose development servers publicly; recheck upstream fixes before updating this tooling. A clean production dependency audit is not proof that all application security issues are absent.
 
 Validation: typecheck, production build and 190 unit/integration tests passed. Local browser checks used no funded wallet or live writes. The local Docker daemon was unavailable, so container-level gateway smoke checks remain for CI/deployment. This review does not replace a funded release check or an independent security audit.
+
+### Diagnosing an X connection that returns without connecting
+
+OAuth failures return to the browser-bound, wallet-owned coin page with a fixed error code and an English/Chinese explanation. Without a matching session/state, the return target is My agents and no private coin identity is disclosed. The web log records only `[SHEN X connection]` and the allowlisted code; never log authorization codes, tokens or provider response bodies. Existing `?x=failed` links display a generic retry notice.
+
+`oauth_client` means check the confidential X app's OAuth 2.0 Client ID/Secret; `token_exchange` means check those settings and the exact callback `https://shen.now/api/social/x/callback`; `permissions` means X did not return required scopes/refresh access; `profile_access` means X denied the authenticated `/2/users/me` read; `credits` means X returned HTTP 402; `rate_limited` means HTTP 429. `browser_mismatch`, `expired` and `session_required` require a new Connect X flow in the same signed-in browser. `server_error` means investigate server-side storage/encryption configuration. Rebuild and deploy this revision to see these diagnostics; do not replay a previously consumed authorization code or disable the ownership/PKCE checks.
+
+
+Token launch readiness checks the dedicated signing service and BNB Chain, independently of agent activation. Missing worker heartbeats, provider credit or optional X/research/image capabilities do not block token creation. Wallet ownership, authorization, metadata validation, contract preflight and receipt verification still apply. The worker continues enforcing provider availability, credit reservations and treasury funding before acting. X can be connected before or after launch for coins with community updates enabled.

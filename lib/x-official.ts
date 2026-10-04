@@ -1,26 +1,38 @@
 type XReadPost={id:string;text:string;created_at:string;author_id:string;referenced_tweets?:{type:string}[];entities?:{urls?:{url:string;expanded_url:string;media_key?:string}[]};attachments?:{media_keys?:string[]}};
 import { ProviderFailure } from './content-providers.ts';
+import { XConnectionError } from './x-connection-result.ts';
 
 export const X_SCOPES = ['tweet.read', 'tweet.write', 'users.read', 'media.write', 'offline.access'];
 export type XTokens = { accessToken: string; refreshToken: string; expiresAt: number; scopes: string[] };
-export class XAccessRevoked extends ProviderFailure { constructor() { super(false, null); } }
+export class XHttpFailure extends ProviderFailure { readonly status:number;constructor(status:number){super();this.status=status;} }
+export class XAccessRevoked extends XHttpFailure { constructor() { super(401);this.uncertain=false; } }
 export async function xRequest(token: string, path: string, init: RequestInit = {}, transport: typeof fetch = fetch) {
   let response: Response;
   try { response = await transport('https://api.x.com' + path, { ...init, headers: { ...init.headers, Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(45000) }); }
   catch { throw new ProviderFailure(); }
   if (response.status === 401) throw new XAccessRevoked();
-  if (!response.ok) throw new ProviderFailure();
+  if (!response.ok) throw new XHttpFailure(response.status);
   try { return await response.json(); } catch { throw new ProviderFailure(); }
 }
 export async function exchangeXToken(clientId: string, clientSecret: string, params: Record<string, string>, transport: typeof fetch = fetch): Promise<XTokens> {
   let response: Response;
   try {
     response = await transport('https://api.x.com/2/oauth2/token', { method: 'POST', headers: { Authorization: 'Basic ' + btoa(encodeURIComponent(clientId) + ':' + encodeURIComponent(clientSecret)), 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ ...params, client_id: clientId }), redirect: 'error', signal: AbortSignal.timeout(20000) });
-  } catch { throw new XAccessRevoked(); }
-  if (!response.ok) throw new XAccessRevoked();
-  const value = await response.json() as {scope?:string;token_type?:string;access_token?:string;refresh_token?:string;expires_in:number};
+  } catch { throw new XConnectionError('x_unavailable'); }
+  if (!response.ok) {
+    const detail=await response.json().catch(()=>null) as {error?:unknown}|null;
+    if(response.status===401||detail?.error==='invalid_client'||detail?.error==='unauthorized_client')throw new XConnectionError('oauth_client');
+    if(detail?.error==='invalid_grant')throw new XConnectionError('expired');
+    if(detail?.error==='invalid_scope')throw new XConnectionError('permissions');
+    if(response.status===429)throw new XConnectionError('rate_limited');
+    throw new XConnectionError(response.status>=500?'x_unavailable':'token_exchange');
+  }
+  let value:{scope?:string;token_type?:string;access_token?:string;refresh_token?:string;expires_in:number};
+  try{value=await response.json()}catch{throw new XConnectionError('x_unavailable')}
+  if(!value||typeof value!=='object')throw new XConnectionError('x_unavailable');
   const scopes = typeof value.scope === 'string' ? value.scope.split(' ') : [];
-  if (value.token_type?.toLowerCase() !== 'bearer' || typeof value.access_token !== 'string' || !value.access_token || typeof value.refresh_token !== 'string' || !value.refresh_token || !Number.isSafeInteger(value.expires_in) || value.expires_in < 60 || !X_SCOPES.every(s => scopes.includes(s))) throw new XAccessRevoked();
+  if (value.token_type?.toLowerCase() !== 'bearer' || typeof value.access_token !== 'string' || !value.access_token || !Number.isSafeInteger(value.expires_in) || value.expires_in < 60) throw new XConnectionError('x_unavailable');
+  if(typeof value.refresh_token !== 'string' || !value.refresh_token || !X_SCOPES.every(s => scopes.includes(s)))throw new XConnectionError('permissions');
   return { accessToken: value.access_token, refreshToken: value.refresh_token, expiresAt: Date.now() + value.expires_in * 1000, scopes };
 }
 export function xProvider(billingToken: string, transport: typeof fetch = fetch) {

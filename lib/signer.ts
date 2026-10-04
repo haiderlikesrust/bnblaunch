@@ -2,7 +2,6 @@ import { env } from "cloudflare:workers";
 import { isAddress, type Address } from "viem";
 import { AppError, db } from "./server";
 import type { Coin } from "./model";
-import { xAccount, xConnected } from './social-config';
 
 export async function signerRequest<T>(path:string,data?:unknown):Promise<T>{
   if(!env.SIGNER_URL||!env.SIGNER_WEB_TOKEN||env.SIGNER_WEB_TOKEN.length<40)throw new AppError(503,"Agent wallets are not configured yet. Your launch plan is saved.");
@@ -21,16 +20,23 @@ export async function agentWallet(coinId:string){
   if(!row||row.address!==value.address.toLowerCase())throw new AppError(503,"Agent wallet binding changed. Launch is blocked.");
   return value.address as Address;
 }
-export async function launchReadiness(coin:Coin){
-  if(coin.social&&!xConnected(await xAccount(coin.id)))return {ready:false,reason:"Connect and verify the coin’s X account below before launching."};
-  const required=["funding-reconciliation","cost-reservations","autonomous-planning","transaction-execution",...(coin.website?["website-publishing"]:[]),...(coin.social?["x-publishing"]:[]),...(coin.research?["brave-research"]:[]),...(coin.images?["image-publishing"]:[])];
+// Creating a token only depends on its wallet. Provider funding, worker health
+// and optional features are checked when the agent actually uses them.
+export async function launchReadiness(_coin:Coin){
   if(!env.SIGNER_URL||!env.SIGNER_WEB_TOKEN)return {ready:false,reason:"Agent wallet service needs to be connected."};
+  const signer=await signerRequest<{chainId:number;signingReady:boolean}>("/v1/status");
+  return signer.chainId===56&&signer.signingReady?{ready:true,reason:"Ready to launch"}:{ready:false,reason:"Agent wallet signing is unavailable. The platform wallet service must be ready to receive your token’s fees."};
+}
+export async function agentReadiness(coin:Coin){
+  const wallet=await launchReadiness(coin);
+  if(!wallet.ready)return wallet;
   if(!env.OPENROUTER_API_KEY)return {ready:false,reason:"Agent compute needs to be configured."};
   const health=await db().prepare("SELECT checked_at,capabilities FROM runtime_health WHERE id='worker'").first<{checked_at:number;capabilities:string}>();
-  if(!health||!Number.isSafeInteger(health.checked_at)||health.checked_at>Date.now()+10000||Date.now()-health.checked_at>120000)return {ready:false,reason:"The agent worker is not ready. Your plan is saved; launch opens when its services are available."};
-  const capabilities:unknown=JSON.parse(health.capabilities);
-  if(!Array.isArray(capabilities)||required.some(v=>!capabilities.includes(v)))return {ready:false,reason:"Some of this agent’s services are still being connected. Your launch plan is saved."};
-  const signer=await signerRequest<{chainId:number;signingReady:boolean}>("/v1/status");
-  return signer.chainId===56&&signer.signingReady?{ready:true,reason:"Ready"}:{ready:false,reason:"Agent transaction signing is unavailable."};
+  if(!health||!Number.isSafeInteger(health.checked_at)||health.checked_at>Date.now()+10000||Date.now()-health.checked_at>120000)return {ready:false,reason:"The agent worker is not ready."};
+  let capabilities:unknown;
+  try{capabilities=JSON.parse(health.capabilities)}catch{return {ready:false,reason:"Agent runtime status is unavailable."}}
+  const required=["funding-reconciliation","cost-reservations","autonomous-planning","transaction-execution"];
+  if(!Array.isArray(capabilities)||required.some(v=>!capabilities.includes(v)))return {ready:false,reason:"Agent compute or transaction services are not ready."};
+  return {ready:true,reason:"Ready"};
 }
 export async function requireLaunchReady(coin:Coin){const status=await launchReadiness(coin);if(!status.ready)throw new AppError(503,status.reason);}

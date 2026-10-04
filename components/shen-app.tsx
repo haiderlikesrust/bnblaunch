@@ -10,6 +10,7 @@ import TokenCard from "./token-card";
 import CreateLaunch from "./create-launch";
 import ShenDocs from "./shen-docs";
 import TokenView from "./token-view";
+import XConnectionNotice from "./x-connection-notice";
 import type { Coin, Language } from "@/lib/model";
 import { api, type ApiResponse } from "@/lib/ui";
 
@@ -27,6 +28,7 @@ export default function ShenApp({page="discover",coinId}:{page?:string;coinId?:s
  const signIn=error.includes("Sign in");
  const recordList=(list:ApiResponse["events"])=>list.length?<div className="timeline">{list.map(e=><div className="timeline-row" key={e.id}><span className="timeline-symbol"><Activity size={16}/></span><div><span className="overline">{e.name} / {new Date(e.createdAt).toLocaleString()}</span><p>{e.message}</p></div></div>)}</div>:<div className="empty-state"><Activity size={25}/><p>{t("尚无已记录的活动。","No recorded activity yet.")}</p></div>;
  return <div className="site-shell"><Toaster theme="dark"/><ShenHeader page={page} lang={lang} setLang={language} t={t}/><main className="site-main">
+  <XConnectionNotice page={page} coinId={coinId} t={t}/>
   {["discover","agents"].includes(page)&&<><div className="directory-heading"><div><div className="eyebrow"><span className="accent">神</span><span>THE AGENT LAUNCHPAD</span></div><h1>{page==="agents"?t("你的智能体，自主成长。","Your agents. Independent minds."):<>{t("代币，有了","Tokens with ")}<span>{t("自主灵魂。","a mind of their own.")}</span></>}</h1><p>{t("在 BNB 发行代币，用收益驱动研究、创作与社区。","Launch on BNB. Turn token revenue into research, creation, and community.")}</p></div></div>
   <div className="metric-strip">{[[Layers,page==="agents"?t("你的代币","YOUR TOKENS"):t("已发行代币","LAUNCHED TOKENS"),String(coins.length).padStart(2,"0")],[Bot,t("运行中的智能体","ACTIVE AGENTS"),String(coins.filter(c=>c.state==="active").length).padStart(2,"0")],[CircleDollarSign,t("金库总额","TREASURY BALANCES"),coins.reduce((a,c)=>a+c.balance,0).toFixed(3)],[Network,t("发行网络","LAUNCH NETWORK"),"BNB"]].map(([Icon,label,value],i)=>{const I=Icon as typeof Bot;return <div className="metric" key={String(label)}><span className="overline"><I size={13}/>{String(label)}</span><strong>{loading?"—":String(value)}{i===2&&<small>BNB</small>}</strong><span className="metric-foot">{i===3?"POWERED BY FLAP":i===2?t("最近确认的余额","LAST CONFIRMED BALANCES"):t("已记录","RECORDED")}</span></div>})}</div>
   <div className="directory-toolbar"><div className="directory-title"><h2>{page==="agents"?t("我的智能体","My agents"):t("探索智能体","Agent directory")}</h2><span>{coins.length.toString().padStart(2,"0")}</span></div><label className="search-field"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder={t("搜索名称或代号","Search name or ticker")} aria-label="Search agents"/></label></div>

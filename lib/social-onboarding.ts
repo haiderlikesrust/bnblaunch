@@ -2,7 +2,8 @@ import { env } from 'cloudflare:workers';
 import { sealServiceSecret, openServiceSecret } from '../shared/service-secrets.mjs';
 import { AppError, db } from './server';
 import { digest } from './auth';
-import { xProvider, exchangeXToken, X_SCOPES } from './x-official';
+import { xProvider, exchangeXToken, X_SCOPES, XHttpFailure } from './x-official';
+import { XConnectionError } from './x-connection-result';
 import { xAccount, xConfigured, xConnected } from './social-config';
 export const X_OAUTH_COOKIE='shen_x_oauth';
 export function xCallbackUrl(){if(!env.APP_ORIGIN)throw new AppError(503,'Set the public site origin.');const origin=new URL(env.APP_ORIGIN);if(origin.protocol!=='https:'||origin.username||origin.password)throw new AppError(503,'X connection requires an HTTPS site.');return origin.origin+'/api/social/x/callback'}
@@ -24,23 +25,40 @@ export async function beginXConnection(coinId:string,owner:string){
  return {state,url:'https://x.com/i/oauth2/authorize?'+params};
 }
 export async function finishXConnection(state:string,cookie:string|undefined,owner:string,code:string|null,denied=false){
- if(!/^[a-f0-9]{64}$/.test(state)||cookie!==state)throw new AppError(400,'X connection expired or did not start in this browser.');
+ if(!/^[a-f0-9]{64}$/.test(state)||cookie!==state)throw new XConnectionError('browser_mismatch');
  const id=await digest(state),attempt=await db().prepare("SELECT * FROM x_oauth_attempts WHERE id=? AND owner=? AND status='pending' AND expires_at>?").bind(id,owner,Date.now()).first<{coin_id:string;encrypted_verifier:string}>();
- if(!attempt)throw new AppError(400,'X connection expired or was already used.');
+ if(!attempt)throw new XConnectionError('expired');
  const claimed=await db().prepare("UPDATE x_oauth_attempts SET status='exchanging',encrypted_verifier='' WHERE id=? AND owner=? AND status='pending' AND expires_at>?").bind(id,owner,Date.now()).run();
- if(!claimed.meta.changes)throw new AppError(409,'X connection was already used.');
+ if(!claimed.meta.changes)throw new XConnectionError('expired');
+ let stage='credentials';
  try{
-  if(denied||!code||code.length>2048)throw new AppError(400,'X authorization was not completed.');
+  if(denied||!code||code.length>2048)throw new XConnectionError('denied');
   const {verifier}=await openServiceSecret(env.SERVICE_CREDENTIALS_KEY,'x-oauth:'+id+':'+owner,attempt.encrypted_verifier) as {verifier:string};
+  stage='token';
   const tokens=await exchangeXToken(env.X_CLIENT_ID!,env.X_CLIENT_SECRET!,{grant_type:'authorization_code',code,redirect_uri:xCallbackUrl(),code_verifier:verifier});
-  const user=await xProvider(env.X_API_BEARER_TOKEN!).me(tokens.accessToken),existing=await xAccount(attempt.coin_id);
-  if(existing&&existing.user_id!==user.id)throw new AppError(403,'Reconnect the original X account.');
+  stage='profile';
+  const user=await xProvider(env.X_API_BEARER_TOKEN!).me(tokens.accessToken);
+  stage='storage';
+  const existing=await xAccount(attempt.coin_id);
+  if(existing&&existing.user_id!==user.id)throw new XConnectionError('account_mismatch');
   const other=await db().prepare('SELECT coin_id FROM x_accounts WHERE user_id=? AND coin_id!=?').bind(user.id,attempt.coin_id).first();
-  if(other)throw new AppError(409,'This X account belongs to another coin.');
+  if(other)throw new XConnectionError('account_in_use');
   const version=crypto.randomUUID(),encrypted=await sealServiceSecret(env.SERVICE_CREDENTIALS_KEY,attempt.coin_id+':'+user.id+':'+version,tokens);
   const saved=await db().prepare("INSERT INTO x_accounts(coin_id,user_id,username,encrypted_session,version,updated_at,auth_type,reconnect_required,refresh_status) VALUES(?,?,?,?,?,?,'oauth2',0,'idle') ON CONFLICT(coin_id) DO UPDATE SET username=excluded.username,encrypted_session=excluded.encrypted_session,version=excluded.version,updated_at=excluded.updated_at,auth_type='oauth2',reconnect_required=0,refresh_status='idle' WHERE x_accounts.user_id=excluded.user_id").bind(attempt.coin_id,user.id,user.username,encrypted,version,Date.now()).run();
-  if(!saved.meta.changes)throw new AppError(409,'The bound X identity cannot change.');
+  if(!saved.meta.changes)throw new XConnectionError('account_mismatch');
   await db().prepare("UPDATE x_oauth_attempts SET status='complete' WHERE id=?").bind(id).run();
   return attempt.coin_id;
- }catch(error){await db().prepare("UPDATE x_oauth_attempts SET status='failed' WHERE id=?").bind(id).run();throw error;}
+ }catch(error){
+  await db().prepare("UPDATE x_oauth_attempts SET status='failed' WHERE id=?").bind(id).run();
+  if(error instanceof XConnectionError)throw error;
+  if(stage==='profile')throw new XConnectionError(error instanceof XHttpFailure?error.status===401?'profile_auth':error.status===402?'credits':error.status===403?'profile_access':error.status===429?'rate_limited':'x_unavailable':'x_unavailable');
+  throw new XConnectionError('server_error');
+ }
+}
+// The return target comes from the owned, browser-bound attempt, never a query
+// parameter supplied by X or an arbitrary redirect URL.
+export async function xConnectionCoin(state:string,cookie:string|undefined,owner:string){
+ if(!/^[a-f0-9]{64}$/.test(state)||cookie!==state)return null;
+ const attempt=await db().prepare('SELECT a.coin_id FROM x_oauth_attempts a JOIN coins c ON c.id=a.coin_id WHERE a.id=? AND a.owner=? AND c.owner=?').bind(await digest(state),owner,owner).first<{coin_id:string}>();
+ return attempt?.coin_id??null;
 }

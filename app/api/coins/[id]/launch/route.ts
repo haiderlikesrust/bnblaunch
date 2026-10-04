@@ -14,7 +14,7 @@ const input=z.discriminatedUnion("action",[
 ]);
 export async function GET(_request:Request,{params}:{params:Promise<{id:string}>}){
   try{const owner=await identity();const {coin}=await ownedCoin((await params).id,owner);const readiness=await launchReadiness(coin);
-    return response({chainId:56,portal:PORTAL,method:"newTokenV6",tokenVersion:6,token:coin.symbol,initialPurchaseBnb:0,taxPercent:coin.taxRate,taxDurationDays:365,antiFarmerMinutes:60,allocations:{treasury:coin.treasury,holders:coin.holders,burn:coin.burn,liquidity:coin.liquidity},agentExecutorEnabled:readiness.ready,readiness,treasuryMode:"agent-wallet"});
+    return response({chainId:56,portal:PORTAL,method:"newTokenV6",tokenVersion:6,token:coin.symbol,initialPurchaseBnb:0,taxPercent:coin.taxRate,taxDurationDays:365,antiFarmerMinutes:60,allocations:{treasury:coin.treasury,holders:coin.holders,burn:coin.burn,liquidity:coin.liquidity},agentWalletReady:readiness.ready,readiness,treasuryMode:"agent-wallet"});
   }catch(e){return failure(e)}
 }
 export async function POST(request:Request,{params}:{params:Promise<{id:string}>}){
@@ -78,6 +78,6 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
     ]);
     const saved=await db().prepare("SELECT calldata FROM prepared_launches WHERE id=?").bind(v.authorizationId).first<{calldata:string}>();
     if(saved?.calldata!==calldata)throw new AppError(409,"This authorization was already used for a different plan.");
-    return response({planId:v.authorizationId,transaction:{from:auth.creator,to:PORTAL,data:calldata,value:"0x0",chainId:"0x38",gas:"0x"+(gas*120n/100n).toString(16)},predictedAddress:predicted,treasury,preflight:"passed",agentExecutorEnabled:true});
+    return response({planId:v.authorizationId,transaction:{from:auth.creator,to:PORTAL,data:calldata,value:"0x0",chainId:"0x38",gas:"0x"+(gas*120n/100n).toString(16)},predictedAddress:predicted,treasury,preflight:"passed",agentWalletReady:true});
   }catch(e){return failure(e)}
 }

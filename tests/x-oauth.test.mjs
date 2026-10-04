@@ -5,11 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { readdirSync, readFileSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { openServiceSecret, sealServiceSecret } from '../shared/service-secrets.mjs';
-register('./runtime-loader.mjs', import.meta.url);
+register('./x-oauth-loader.mjs', import.meta.url);
 const env = globalThis.__shenTestEnv = { APP_ORIGIN: 'https://shen.now', X_CLIENT_ID: 'client', X_CLIENT_SECRET: 'secret', X_API_BEARER_TOKEN: 'billing', SERVICE_CREDENTIALS_KEY: randomBytes(32).toString('hex') };
 const { beginXConnection, finishXConnection, socialStatus } = await import('../lib/social-onboarding.ts');
 const { xAccount, xSession, xCosts } = await import('../lib/social-config.ts');
 const { X_SCOPES } = await import('../lib/x-official.ts');
+const {GET:callback}=await import('../app/api/social/x/callback/route.ts');
+const {xConnectionCode}=await import('../lib/x-connection-result.ts');
 const originalFetch = globalThis.fetch;
 const json = v => Response.json(v);
 function fixture() {
@@ -29,8 +31,46 @@ function fixture() {
   if (url.endsWith('/users/me')) return json({ data: { id: userId, username: 'shen' } });
   throw Error('Unexpected external request');
  };
- return { sql, requests, user(id) { userId = id; }, scopes(value) { scope = value; }, failRefresh() { failRefresh = true; }, close() { sql.close(); globalThis.fetch = originalFetch; } };
+ return { sql, requests, user(id) { userId = id; }, scopes(value) { scope = value; }, failRefresh() { failRefresh = true; }, close() { sql.close(); globalThis.fetch = originalFetch;delete globalThis.__xTestCookies; } };
 }
+
+async function callbackSession(f,state){
+ const session='a'.repeat(64),hash=createHash('sha256').update(session).digest('hex');
+ f.sql.prepare('INSERT INTO wallet_sessions(id,wallet,expires_at) VALUES(?,?,?)').run(hash,'owner',Date.now()+60000);
+ globalThis.__xTestCookies={shen_session:session,shen_x_oauth:state};
+}
+const callbackRequest=state=>new Request('https://shen.now/api/social/x/callback?state='+state+'&code=private-authorization-code');
+
+for(const [stage,status,providerError,expected] of [
+ ['token',401,'invalid_client','oauth_client'],['token',400,'invalid_grant','expired'],
+ ['profile',403,'Forbidden','profile_access'],['profile',402,'CreditsDepleted','credits'],['profile',429,'TooManyRequests','rate_limited'],
+])test(`OAuth callback reports ${expected} on the owned coin without exposing secrets`,async()=>{
+ const f=fixture();try{
+  const start=await beginXConnection('coin','owner');await callbackSession(f,start.state);
+  const previous=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>url.endsWith(stage==='token'?'/oauth2/token':'/users/me')?Response.json({error:providerError,error_description:'private-provider-secret'},{status}):previous(url,init);
+  const result=await callback(callbackRequest(start.state));
+  assert.equal(result.status,303);
+  assert.equal(result.headers.get('location'),'https://shen.now/token/coin?x=failed&x_error='+expected);
+  assert.equal(result.headers.get('referrer-policy'),'no-referrer');
+  assert.match(result.headers.get('set-cookie'),/Max-Age=0/);
+  assert.equal((await xAccount('coin')),null);
+  assert.equal(f.sql.prepare('SELECT status FROM x_oauth_attempts').get().status,'failed');
+  assert.equal(JSON.stringify([...result.headers]).includes('private-'),false);
+ }finally{f.close()}
+});
+
+test('successful callback returns to coin; absent session and forged state reveal no coin',async()=>{
+ const f=fixture();try{
+  const start=await beginXConnection('coin','owner');
+  assert.equal((await callback(callbackRequest(start.state))).headers.get('location'),'https://shen.now/agents?x=failed&x_error=session_required');
+  await callbackSession(f,start.state);
+  assert.equal((await callback(callbackRequest('b'.repeat(64)))).headers.get('location'),'https://shen.now/agents?x=failed&x_error=browser_mismatch');
+  assert.equal((await callback(callbackRequest(start.state))).headers.get('location'),'https://shen.now/token/coin?x=connected');
+  assert.equal((await socialStatus('coin')).connected,true);
+  for(const raw of ['__proto__','constructor','<script>','private-provider-secret',null])assert.equal(xConnectionCode(raw),'connection_failed');
+ }finally{f.close()}
+});
 test('OAuth binds browser, owner, PKCE and one-time state; stores encrypted tokens without a public post', async () => {
  const f = fixture(); try {
   const start = await beginXConnection('coin', 'owner'), url = new URL(start.url);
