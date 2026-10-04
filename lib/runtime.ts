@@ -83,6 +83,14 @@ export async function runAgentTick(capabilities?:string[]){
   if(!capabilities.includes("autonomous-planning"))return {processed:false,reason:"runtime_configuration_required"};
   const lease=await acquire();if(!lease)return {processed:false,reason:"no_due_agents"};let nextMinutes=.5,nextPlanAt:number|null=null,lastReason="wallet_check_failed";
   const tickResult=(reason:string)=>{lastReason=reason;return {processed:true,reason}};
+  const rejectedResult=async(reason:string)=>{
+    // Retry only settled attempts: unknown charges keep their reservation and
+    // remain blocked for reconciliation. Limit bursts to three failures/15 min.
+    const recent=await db().prepare("SELECT COUNT(*) AS total FROM agent_runs WHERE coin_id=? AND kind='plan' AND status='settled' AND created_at>=? AND NOT EXISTS(SELECT 1 FROM agent_memories WHERE agent_memories.id=agent_runs.id AND agent_memories.coin_id=agent_runs.coin_id)").bind(lease.coinId,new Date(Date.now()-15*60000).toISOString()).first<{total:number}>();
+    if(Number(recent?.total??0)<3){nextPlanAt=0;nextMinutes=0;}
+    else{nextPlanAt=Date.now()+15*60000;nextMinutes=1;}
+    return tickResult(reason);
+  };
   try{
     const row=await db().prepare("SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL").bind(lease.coinId).first<CoinRow>();if(!row)return {processed:false,reason:"coin_unavailable"};
     const coin=JSON.parse(row.config) as Coin;
@@ -145,8 +153,8 @@ export async function runAgentTick(capabilities?:string[]){
     const websiteQuote=coin.website&&!hosted?await bnbPrice().catch(()=>null):null;
     const siteTiming=websiteTiming(feeFlow.lifetimeDistributedWei,websiteQuote?.answer);
     const run=await reserve(lease,ceiling);
-    // Frequent wallet checks must not turn into a paid model call every minute.
-    // A failed/rejected attempt keeps a cooldown; approved plans choose their pace.
+    // Unexpected failures retain a cooldown; settled rejections can retry on
+    // the next worker pass with a bounded burst. Approved plans set their pace.
     nextPlanAt=Date.now()+15*60000;
     // Any ambiguous provider failure keeps its reservation. Non-billable chain
     // preflight is complete before reserving, so known local failures don't lock credit.
@@ -164,22 +172,22 @@ export async function runAgentTick(capabilities?:string[]){
     lastReason="planner_request_failed";
     let result;
     try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS,32000,{coinId:coin.id,runId:run.id,kind:"planner"});}catch(error){
-      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return tickResult(error.truncated?"planner_output_truncated":"plan_rejected");}
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return await rejectedResult(error.truncated?"planner_output_truncated":"plan_rejected");}
       if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,researchCost,'Planner request rejected before dispatch.');throw error;
     }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return tickResult("plan_rejected");}
+    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return await rejectedResult("plan_rejected");}
     lastReason="guard_request_failed";
     let guard;
     try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},GUARD_OUTPUT_TOKENS,64000,{coinId:coin.id,runId:run.id,kind:"plan-guard"});}catch(error){
-      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return tickResult(error.truncated?"guard_output_truncated":"plan_rejected");}
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return await rejectedResult(error.truncated?"guard_output_truncated":"plan_rejected");}
       if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,result.cost+researchCost,'Guard request rejected before dispatch.');throw error;
     }
     lastReason="plan_save_failed";
     let decoded:unknown;try{decoded=JSON.parse(guard.text)}catch{decoded=null}
     const verdict=z.object({allow:z.boolean(),reason:z.string().max(1000)}).strict().safeParse(decoded);
     await settle(coin.id,run,result.cost+guard.cost+researchCost,JSON.stringify(plan));
-    if(!verdict.success||!verdict.data.allow)return tickResult("plan_rejected");
+    if(!verdict.success||!verdict.data.allow)return await rejectedResult("plan_rejected");
     const current=await db().prepare("SELECT config FROM coins WHERE id=?").bind(coin.id).first<{config:string}>();if(!current)throw new AppError(409,"Coin changed during planning.");
     const updated={...JSON.parse(current.config),lastPlanRunId:run.id};
     const now=Date.now();

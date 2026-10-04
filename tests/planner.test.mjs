@@ -230,3 +230,38 @@ for(const mode of ['unverified','empty','insufficient','fee_audit'])test('prepai
   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
  }finally{f.close();}
 });
+
+
+for(const mode of ['planner-length','guard-length','schema','guard-rejection'])test('settled rejection retries immediately with a bounded burst: '+mode,async()=>{
+ const f=fixture();try{
+  if(mode==='schema')f.output({...plan,nextCheckMinutes:0});
+  else if(mode==='guard-rejection')f.reject();
+  else f.modifyReply((reply,guard)=>{if(guard===(mode==='guard-length'))reply.choices[0].finish_reason='length';return reply});
+  for(let attempt=1;attempt<=3;attempt++){
+   await runAgentTick(['autonomous-planning']);
+   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_runs').get().n,attempt);
+   const s=f.sql.prepare('SELECT next_run_at,next_plan_at FROM runtime_leases').get();
+   if(attempt<3){assert.equal(s.next_plan_at,0);assert.ok(s.next_run_at<=Date.now());}
+   else{assert.ok(s.next_plan_at>Date.now()+14*60000);assert.ok(s.next_run_at>Date.now());}
+  }
+  const calls=f.calls.length;
+  f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');assert.equal(f.calls.length,calls);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_memories').get().n,0);
+ }finally{f.close();}
+});
+
+test('deployment wakes an old rejected plan without resetting approved or unsettled work',()=>{
+ const f=fixture();try{
+  f.sql.prepare('INSERT INTO runtime_leases(coin_id,lease_until,next_run_at,next_plan_at) VALUES(?,0,?,?)').run('coin',Date.now()+60000,Date.now()+900000);
+  f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('retry','coin','plan','settled',100,?)").run(new Date().toISOString());
+  const migration=readFileSync('drizzle/0026_wake_rejected_plans.sql','utf8');
+  f.sql.exec(migration);assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,0);
+  f.sql.prepare('UPDATE runtime_leases SET next_plan_at=123').run();
+  f.sql.prepare("UPDATE agent_runs SET status='reserved'").run();f.sql.exec(migration);assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,123);
+  f.sql.prepare("UPDATE agent_runs SET status='settled'").run();
+  f.sql.prepare("INSERT INTO agent_memories VALUES('retry','coin','approved','',?)").run(Date.now());
+  f.sql.exec(migration);assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,123);
+ }finally{f.close();}
+});
