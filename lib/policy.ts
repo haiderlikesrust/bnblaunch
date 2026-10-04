@@ -2,6 +2,10 @@ import { z } from "zod";
 import { AGENT_MODELS, DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PURPOSE, type AgentModelId } from "./agent-models.ts";
 import { influencerInput } from "./influencer-options.ts";
 export const creatorFields=z.object({name:z.string().trim().min(1).max(32),symbol:z.string().trim().regex(/^[A-Z0-9]{2,10}$/),description:z.string().trim().min(10).max(600),language:z.enum(["zh","en"]),purpose:z.string().trim().min(20).max(2000).default(DEFAULT_AGENT_PURPOSE),personality:z.string().trim().max(300).default(""),focus:z.string().trim().max(300).default(""),modelId:z.enum(AGENT_MODELS.map(m=>m.id) as [AgentModelId,...AgentModelId[]]).default(DEFAULT_AGENT_MODEL),social:z.boolean(),research:z.boolean(),website:z.boolean(),images:z.boolean(),influencer:influencerInput.nullable().default(null)}).strict();
+// Step checks inspect only their own fields from the shared form. Final/API
+// validation below remains strict and rejects unknown or platform-owned fields.
+export const identityStepInput=creatorFields.pick({name:true,symbol:true,description:true,language:true}).strip();
+export const agentStepInput=creatorFields.omit({influencer:true}).strip();
 // The influencer publishes on X, so it requires the community-updates capability.
 const influencerRule=(v:{influencer:unknown;social:boolean})=>!v.influencer||v.social,influencerIssue={message:"The AI influencer posts on X, so community updates must stay on.",path:["influencer"]};
 export const influencerNeedsX:[typeof influencerRule,typeof influencerIssue]=[influencerRule,influencerIssue];

@@ -154,3 +154,12 @@ Updated to the new intended behavior: `tests/planner.test.mjs` (provider failure
 ## 8. Files not created by Claude
 
 These appeared at 09:26–09:27 during this session from another session, and were **not modified** by Claude: `docs/MARTIAN-RECOVERY.md`, `services/signer/recover-martian.mjs`, `services/signer/test-fee-recovery.mjs`, `services/signer/test-fee-recovery.test.mjs`. They're a local admin script that transfers up to 0.03 BNB from the MARTIAN agent wallet to a fixed address "authorized by the operator in this chat"; please confirm you requested it. Their tests pass with the signer changes above.
+
+## Follow-up: activity-based community work
+
+Removed the legacy one-per-hour/eight-per-day publication quota. Publication timing now responds to confirmed fee dispatch, fresh volume trends and available credit; planning/research cadence follows the same activity signal within 1–5 minutes. A proposed publication is queued once for its due time, surfaced in the console, and rescheduled as activity changes. Exact unchanged console summaries are suppressed while every approved plan remains in memory. Text-only gallery work no longer needs an artwork allowance; confirmed zero-charge image failures can try the alternate supported Seedream model within the original reservation, while ambiguous writes remain isolated.
+
+### Creation wizard correction
+Identity and Agent step validation now inspect only their respective fields in the shared form; fields from later steps no longer produce “Unrecognized keys” on Continue. Final creation/API validation remains strict. Regression tests cover the reported Identity input, unfinished mission fields, Agent progression and final rejection of unknown/platform fields.
+
+Follow-up validation: 340 automated tests, TypeScript, and the Dokploy production build passed. Live paid image generation and the deployed browser were not exercised.

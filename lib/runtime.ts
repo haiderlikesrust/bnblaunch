@@ -1,3 +1,4 @@
+import { activityCadence } from './activity-cadence';
 import { agentMemory, memoryStatement } from "./agent-memory";
 import { isolatedProviderHold, providerHoldStatement } from './provider-holds';
 import { xCosts } from "./social-config";
@@ -19,7 +20,7 @@ import { bnbPrice, computeCapacity, hasPrepaidServices } from "./funding";
 import { chainClient, research } from "./providers";
 import { agentPlan, PLANNER_RULES, PLAN_FORMAT_RULES, PLAN_GUARD_RULES, PUBLICATION_LINK_RULES, validatePlanFunds, publicationLinksAllowed } from "./runtime-policy";
 import type { Coin } from "./model";
-import { contentCapabilities, contentJobStatement, contentSnapshot } from './content-runtime';
+import { contentCapabilities, contentJobStatement, contentSnapshot, publicationSchedule } from './content-runtime';
 import { influencerConfigured, influencerFunding } from './influencer-runtime';
 import { validatePublication, publicationUrls } from './content-policy';
 import { marketContext } from './market';
@@ -147,19 +148,20 @@ export async function runAgentTick(capabilities?:string[]){
     const xRates=coin.social?xCosts("https://shen.now"):null;
     const contentAllowance=heldContent?0:(coin.images?125000:0)+(xRates?xRates.post+xRates.upload+xRates.read*3:0);
     // Prefer a smaller useful cycle when credit cannot reserve every tool step.
-    while(maxSearches>0&&row.ai_credit_microusd<ceiling+contentAllowance){maxSearches--;ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)*(maxSearches+1)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+maxSearches*(canResearch?researchRate:0);}
+    while(maxSearches>0&&row.ai_credit_microusd<ceiling){maxSearches--;ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)*(maxSearches+1)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+maxSearches*(canResearch?researchRate:0);}
     lastReason="signer_policy_unavailable";
     const signerPolicy=await signerRequest<{gasReserveWei:string;buybacksEnabled:boolean}>("/v1/status");
     const protocolReserve=BigInt(wallet.protocolReserveWei);
     const minimumGas=BigInt(signerPolicy.gasReserveWei),gasReserve=wei/100n>minimumGas?wei/100n:minimumGas,available=wei>gasReserve+protocolReserve?wei-gasReserve-protocolReserve:0n;
-    const plannerNeed=ceiling+contentAllowance;
+    const plannerNeed=ceiling;
     // The influencer's next spend may trigger a funded top-up; it never blocks planning.
-    const influencerNeed=treasuryFunded?await influencerFunding(coin.id).catch(()=>0):0;
+    const influencerNeed=contentAllowance+(treasuryFunded?await influencerFunding(coin.id).catch(()=>0):0);
     if(row.ai_credit_microusd<plannerNeed+influencerNeed){
       // Below the activation threshold, use already-paid credit only. New
       // payments still require the treasury threshold and all reserve checks.
-      if(!treasuryFunded)return tickResult("awaiting_service_funding");
+      if(!treasuryFunded&&row.ai_credit_microusd<plannerNeed)return tickResult("awaiting_service_funding");
       const refill=async()=>{
+        if(!treasuryFunded)return "awaiting_service_funding";
         lastReason="funding_price_unavailable";
         const price=await bnbPrice();
         lastReason="service_capacity_unavailable";
@@ -175,7 +177,7 @@ export async function runAgentTick(capabilities?:string[]){
         await queue(lease,"compute",amount.toString(),"Prepay metered agent services from treasury.",{reserve:fundingReserve,capacity:capacity.available});return "service_payment_queued";
       };
       if(row.ai_credit_microusd<plannerNeed)return tickResult(await refill());
-      // Only the influencer is short: a deferred or failed top-up keeps planning.
+      // Optional media is short: a deferred or failed top-up keeps text/research planning.
       if(await refill().catch(()=>null)==="service_payment_queued")return tickResult("service_payment_queued");
     }
     lastReason="planning_context_unavailable";
@@ -190,6 +192,9 @@ export async function runAgentTick(capabilities?:string[]){
     const siteTiming=websiteTiming(feeFlow.lifetimeDistributedWei,websiteQuote?.answer);
     const observedAt=Date.now();
     const [tasks,history,cycleCosts]=await Promise.all([agentTasks(coin.id),researchHistory(coin.id),db().prepare("SELECT cost_microusd FROM agent_runs WHERE coin_id=? AND kind='plan' AND status='settled' ORDER BY created_at DESC,id DESC LIMIT 8").bind(coin.id).all<{cost_microusd:number}>()]);
+    const previousCost=cycleCosts.results.length?cycleCosts.results.reduce((n,r)=>n+Number(r.cost_microusd),0)/cycleCosts.results.length:10000;
+    const activity=activityCadence(feeFlow,currentMarket,row.ai_credit_microusd,previousCost);
+    const publicationTiming=await publicationSchedule(coin.id,activity.publicationMinutes);
     const run=await reserve(lease,ceiling);
     let paidCost=0,inFlight=0;
     const rejectPlan=async(diagnostic:PlanDiagnostic,extraCost=0,reason='plan_rejected')=>{
@@ -214,7 +219,7 @@ export async function runAgentTick(capabilities?:string[]){
     const sources:ReturnType<typeof researchSources>=[];
     lastReason="planning_context_unavailable";
     // Project bounded facts, not full old image prompts or entire site copies.
-    const communityContext={...community,recent:community.recent.map(j=>({id:j.id,status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
+    const communityContext={...community,publicationTiming,activity,recent:community.recent.map(j=>({id:j.id,status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
     const previousSite=hosted?{id:hosted.site.id,title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
     const memory=await agentMemory(coin.id);
     const previousAttempt=await db().prepare("SELECT output FROM agent_runs WHERE coin_id=? AND kind='plan' AND status='settled' ORDER BY created_at DESC,id DESC LIMIT 1").bind(coin.id).first<{output:string|null}>();
@@ -259,11 +264,11 @@ export async function runAgentTick(capabilities?:string[]){
       snapshot.recentResearch=history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))}));
     }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(plan.publication?.destination==='x'&&!publicationLinksAllowed(plan.publication.text,env.APP_ORIGIN,publicationUrls(plan.publication.text)))throw Error('Publication links are limited to SHEN, X, BscScan and Flap');if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.task)await validateTask(coin.id,plan.task);if(plan.publication&&community.publicationPending)throw Error('A publication is already pending');if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch(error){return await rejectPlan(planValidationDiagnostic(error));}
+    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(plan.publication?.destination==='x'&&!publicationLinksAllowed(plan.publication.text,env.APP_ORIGIN,publicationUrls(plan.publication.text)))throw Error('Publication links are limited to SHEN, X, BscScan and Flap');if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.task)await validateTask(coin.id,plan.task);if(plan.publication&&community.publicationPending)throw Error('A publication is already pending');if(plan.publication&&await db().prepare("SELECT id FROM content_jobs WHERE coin_id=? AND json_extract(payload,'$.text')=? AND created_at>? LIMIT 1").bind(coin.id,plan.publication.text,Date.now()-86400000).first())throw Error('This publication text is already recorded; continue other useful work');if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch(error){return await rejectPlan(planValidationDiagnostic(error));}
     // Pace from verified whole-cycle costs; a first cycle estimates review cost
     // from the planner receipt until an actual completed cycle is available.
     const averageCost=cycleCosts.results.length?cycleCosts.results.reduce((n,r)=>n+Number(r.cost_microusd),0)/cycleCosts.results.length:paidCost*2;
-    const cadence=pulseMinutes(row.ai_credit_microusd-paidCost,Math.max(averageCost,paidCost));
+    const cadence=Math.max(activity.planningMinutes,pulseMinutes(row.ai_credit_microusd-paidCost,Math.max(averageCost,paidCost)));
     plan={...plan,nextCheckMinutes:cadence};
     lastReason="guard_request_failed";
     let guard;
@@ -285,10 +290,10 @@ export async function runAgentTick(capabilities?:string[]){
       // The planner never sees chat, so its closeChatMinutes no longer closes chat;
       // prepaid credit and the platform cap gate sessions. Stale closures clear here.
       db().prepare("DELETE FROM agent_chat_control WHERE coin_id=? AND EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(coin.id,coin.id,lease.id,now),
-      db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(run.id,coin.id,row.owner,coin.name,plan.summary,new Date().toISOString(),coin.id,lease.id,now),
+      db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?) AND COALESCE((SELECT message FROM events WHERE coin_id=? ORDER BY created_at DESC LIMIT 1),'')<>?").bind(run.id,coin.id,row.owner,coin.name,plan.summary,new Date().toISOString(),coin.id,lease.id,now,coin.id,plan.summary),
       memoryStatement(lease,run.id,plan.summary,plan.memory??"",now),
       ...(plan.task?[taskStatement(lease,run.id,plan.task,now)]:[]),
-      ...(plan.publication?[contentJobStatement(lease,run.id,plan.publication)]:[]),
+      ...(plan.publication?[contentJobStatement(lease,run.id,plan.publication,publicationTiming.nextAt)]:[]),
       ...(coin.website&&plan.website?websiteStatements(lease,run.id,plan.website,now):[]),
       ...(coin.website&&plan.domain?[domainOrderStatement(lease,run.id,plan.domain,now)]:[]),
     ]);

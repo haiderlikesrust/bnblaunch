@@ -184,7 +184,7 @@ test('wallet checks run within one minute without repeating a paid plan',async()
   await runAgentTick(['autonomous-planning']);
   const schedule=f.sql.prepare('SELECT next_run_at,next_plan_at FROM runtime_leases').get();
   assert.ok(schedule.next_run_at-Date.now()<=60000&&schedule.next_run_at>Date.now());
-  assert.ok(schedule.next_plan_at-Date.now()>50000&&schedule.next_plan_at-Date.now()<=60000);
+  assert.ok(schedule.next_plan_at-Date.now()>170000&&schedule.next_plan_at-Date.now()<=180000);
   const calls=f.calls.length;
   f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();
   assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');
@@ -304,7 +304,7 @@ test('deployment wakes an old rejected plan without resetting approved or unsett
 });
 
 
-test('approved community work queues local text and schedules a mission follow-up on a funded one-minute pulse',async()=>{
+test('approved community work queues local text and schedules a mission follow-up on a funded adaptive pulse',async()=>{
  const f=fixture();try{
   f.output({...plan,nextCheckMinutes:240,website:null,nextResearchQuery:'Mars atmosphere recent research findings',publication:{destination:'gallery',text:'Our mission is to explore Mars through research and original work.',imagePrompt:null,altText:''}});
   f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
@@ -313,7 +313,7 @@ test('approved community work queues local text and schedules a mission follow-u
   const job=f.sql.prepare('SELECT payload,status FROM content_jobs').get();assert.equal(job.status,'queued');assert.equal(JSON.parse(job.payload).destination,'gallery');
   const config=JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config);assert.equal(config.nextResearchQuery,'Mars atmosphere recent research findings');
   const schedule=f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get();assert.ok(schedule.next_plan_at<=Date.now()+5*60000);
-  assert.equal(JSON.parse(f.calls[1].messages[1].content).plan.nextCheckMinutes,1);
+  assert.equal(JSON.parse(f.calls[1].messages[1].content).plan.nextCheckMinutes,3);
   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
  }finally{f.close();}
 });
@@ -518,4 +518,30 @@ test('context trimming preserves full source URLs and identifiers',()=>{
  const url='https://science.nasa.gov/'+ 'mars/'.repeat(250),id='reference-'+ '1'.repeat(150);
  const result=boundedPlanningContext('Research.',{mission:'Mission '.repeat(8000),sources:[],browserResults:[{id,url,text:'Science '.repeat(1000)}],community:{recent:[]},website:null,spending:{market:{lastCandles:[]}}});
  assert.equal(result.browserResults[0].url,url);assert.equal(result.browserResults[0].id,id);assert.ok(contextBytes('Research.',result)<=31000);
+});
+
+test('a publication waiting for cadence is saved once and the next planner sees its pending status',async()=>{
+ const f=fixture();try{
+  const pub={destination:'gallery',text:'Our next useful update.',imagePrompt:null,altText:''};
+  f.sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at) VALUES('prior','coin',?,'complete',?,?)").run(JSON.stringify({...pub,text:'Previously published'}),Date.now(),Date.now());
+  f.output({...plan,publication:pub});await runAgentTick(['autonomous-planning']);
+  assert.ok(f.sql.prepare("SELECT next_attempt_at FROM content_jobs WHERE status='queued'").get().next_attempt_at>Date.now());
+  f.due();f.output({...plan,publication:null});await runAgentTick(['autonomous-planning']);
+  const context=JSON.parse(f.calls[2].messages[1].content);assert.equal(context.community.publicationPending,true);assert.ok(context.community.publicationTiming.nextAt>Date.now());assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM content_jobs WHERE status='queued'").get().n,1);
+ }finally{f.close();}
+});
+test('identical plan summaries do not spam the console but both attempts remain in memory',async()=>{
+ const f=fixture();try{f.output({...plan,website:null});await runAgentTick(['autonomous-planning']);f.due();await runAgentTick(['autonomous-planning']);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM events').get().n,1);assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM agent_memories').get().n,2);
+ }finally{f.close();}
+});
+
+test('prepaid research and plain text do not require an optional artwork allowance',async()=>{
+ const f=fixture();try{
+  f.wallet({balanceWei:'6632000000000000',protocolReserveWei:'2494919121834000',feeAccountingReady:true});
+  f.sql.prepare('UPDATE coins SET config=?,ai_credit_microusd=?').run(JSON.stringify({...f.coin,threshold:.01,images:true}),150000);
+  f.sql.prepare('INSERT INTO compute_funding(settlement_id,coin_id,amount_microusd,settled_at) VALUES(?,?,?,?)').run('prepaid','coin',150000,Date.now());
+  f.output({...plan,website:null,publication:{destination:'gallery',text:'An affordable plain text update.',imagePrompt:null,altText:''}});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'queued');
+ }finally{f.close();}
 });

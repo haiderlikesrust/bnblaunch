@@ -51,15 +51,15 @@ test('unknown image cost never regenerates, then settles at its quote ceiling in
 test('a confirmed image rejection publishes gallery text once and releases unused credit',async()=>{
  const f=fixture();try{
   f.coin('coin');f.job('job','coin','gallery');const provider=globalThis.fetch;let images=0;
-  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/v1/images')){images++;assert.equal(JSON.parse(init.body).resolution,'2K');return new Response('invalid request',{status:400});}return provider(url,init);};
+  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/v1/images')){images++;assert.equal(JSON.parse(init.body).resolution,JSON.parse(init.body).model.endsWith('4.5')?'2K':'1K');return new Response('invalid request',{status:400});}return provider(url,init);};
   for(let i=0;i<5;i++)await runContentTick();
   const job=f.sql.prepare('SELECT * FROM content_jobs').get();assert.equal(job.status,'complete');assert.equal(JSON.parse(job.payload).imagePrompt,null);assert.equal(JSON.parse(job.payload).text,'A verified community update.');
-  assert.equal(images,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd credit FROM coins').get().credit,1000000);assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'settled');
+  assert.equal(images,2);assert.equal(f.sql.prepare('SELECT ai_credit_microusd credit FROM coins').get().credit,1000000);assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'settled');
   assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM events').get().n,1);assert.match(f.sql.prepare('SELECT message FROM events').get().message,/without artwork/);
  }finally{f.close();}
 });
 test('a coin without credit does not starve another gallery job; gallery settlement survives restart',async()=>{
- const f=fixture();try{f.coin('poor',0);f.coin('funded');f.job('a','poor','gallery');f.job('b','funded','gallery');await runContentTick();await runContentTick();await runContentTick();f.sql.exec("UPDATE content_jobs SET status='media_ready',next_attempt_at=0 WHERE id='b'");await runContentTick();assert.equal(f.sql.prepare("SELECT status FROM content_jobs WHERE id='b'").get().status,'complete');assert.equal(f.counts.generations,1);assert.equal(f.counts.posts,0);}finally{f.close()}
+ const f=fixture();try{f.coin('poor',0);f.coin('funded');f.job('a','poor','gallery');f.job('b','funded','gallery');for(let i=0;i<8;i++)await runContentTick();assert.equal(f.sql.prepare("SELECT status FROM content_jobs WHERE id='a'").get().status,'complete','unfunded artwork falls back to approved text');assert.equal(f.sql.prepare("SELECT status FROM content_jobs WHERE id='b'").get().status,'complete');assert.equal(f.counts.generations,1);assert.equal(f.counts.posts,0);}finally{f.close()}
 });
 test('stale expiry cannot refund a competing active X post',{timeout:5000},async()=>{
  const f=fixture(),realNow=Date.now;
@@ -115,4 +115,35 @@ test('a legacy stuck post without posting_at is matched on the timeline since cr
   f.sql.prepare('UPDATE content_jobs SET posting_at=NULL,updated_at=?,next_attempt_at=0').run(Date.now()-61000);await runContentTick();
   const job=f.sql.prepare('SELECT status,tweet_id FROM content_jobs').get();assert.equal(job.status,'complete');assert.equal(job.tweet_id,'888');assert.equal(f.counts.posts,1);
  }finally{f.close()}
+});
+
+test('publication is queued once, has no eight-per-day cap, and follows the adaptive due time',async()=>{
+ const {contentJobStatement,publicationSchedule}=await import('../lib/content-runtime.ts');
+ const f=fixture();try{f.coin('coin');const now=Date.now(),lease={coinId:'coin',id:'lease'};
+  f.sql.prepare('INSERT INTO runtime_leases(coin_id,lease_id,lease_until,next_run_at) VALUES(?,?,?,0)').run('coin','lease',now+60000);
+  for(let i=0;i<9;i++)f.sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at) VALUES(?,?,'{}','complete',?,?)").run('old'+i,'coin',now-(10-i)*3600000,now-(10-i)*3600000);
+  f.sql.prepare("UPDATE content_jobs SET updated_at=? WHERE id='old8'").run(now-60000);
+  const pub={destination:'gallery',text:'A new useful research finding.',imagePrompt:null,altText:''};
+  const slow=await publicationSchedule('coin',60);await contentJobStatement(lease,'new',pub,slow.nextAt).run();
+  await contentJobStatement(lease,'duplicate',pub,slow.nextAt).run();assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM content_jobs WHERE status='queued'").get().n,1);
+  assert.equal((await runContentTick()).processed,false);
+  const fast=await publicationSchedule('coin',5);assert.ok(fast.nextAt<slow.nextAt);
+  assert.equal(f.sql.prepare("SELECT next_attempt_at FROM content_jobs WHERE id='new'").get().next_attempt_at,fast.nextAt);
+  f.sql.prepare("UPDATE content_jobs SET updated_at=? WHERE id='old8'").run(now-3600001);await publicationSchedule('coin',5);
+  await runContentTick();await runContentTick();assert.equal(f.sql.prepare("SELECT status FROM content_jobs WHERE id='new'").get().status,'complete');assert.equal(f.counts.generations,0);
+ }finally{f.close();}
+});
+test('confirmed image failure tries one cheaper alternate and records its real cost',async()=>{
+ const f=fixture();try{f.coin('coin');f.job('job','coin','gallery');const provider=globalThis.fetch;let calls=[];
+  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/v1/images')){const model=JSON.parse(init.body).model;calls.push(model);if(model.endsWith('4.5'))return new Response('{}',{status:400});}return provider(url,init);};
+  for(let i=0;i<6;i++)await runContentTick();
+  assert.deepEqual(calls,['bytedance-seed/seedream-4.5','bytedance-seed/seedream-5-0-flash']);
+  assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'complete');assert.equal(f.sql.prepare('SELECT model FROM content_assets').get().model,'bytedance-seed/seedream-5-0-flash');assert.equal(f.sql.prepare('SELECT ai_credit_microusd c FROM coins').get().c,960000);
+ }finally{f.close();}
+});
+test('gallery text still publishes when artwork is unaffordable or both catalogs are unavailable',async()=>{
+ for(const unavailable of [false,true]){const f=fixture();try{f.coin('coin',0);f.job('job','coin','gallery');const provider=globalThis.fetch;
+  if(unavailable)globalThis.fetch=async(url,init)=>String(url).includes('/images/models/')?new Response('{}',{status:503}):provider(url,init);
+  for(let i=0;i<3;i++)await runContentTick();assert.equal(f.counts.generations,0);assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'complete');assert.equal(JSON.parse(f.sql.prepare('SELECT payload FROM content_jobs').get().payload).imagePrompt,null);
+ }finally{f.close();}}
 });

@@ -16,6 +16,12 @@ export async function imageQuote(model=IMAGE_MODEL,transport:Fetcher=fetch):Prom
  if(!endpoint||typeof price!=='number'||!Number.isFinite(price)||price<=0||price>.1)throw new ProviderFailure(false,0);
  const cost=Math.ceil(price*1000000);return {model,provider:endpoint.provider_tag,cost,ceiling:Math.ceil(cost*1.25)};
 }
+// Catalog failures are read-only: try another supported image model before
+// deciding that image generation is unavailable.
+export async function availableImageQuote(model=IMAGE_MODEL,transport:Fetcher=fetch){
+ for(const candidate of [model,...supportedImageModels.filter(id=>id!==model)])try{return await imageQuote(candidate,transport);}catch{}
+ throw new ProviderFailure(false,0);
+}
 export async function generateImage(apiKey:string,quote:ImageQuote,prompt:string,transport:Fetcher=fetch){
  let r:Response;try{r=await transport('https://openrouter.ai/api/v1/images',{method:'POST',headers:{Authorization:'Bearer '+apiKey,'Content-Type':'application/json','X-Title':'SHEN community artwork'},body:JSON.stringify({model:quote.model,prompt,n:1,resolution:imageResolution(quote.model),aspect_ratio:'1:1',provider:{only:[quote.provider],allow_fallbacks:false}}),redirect:'error',signal:AbortSignal.timeout(120000)});}catch{throw new ProviderFailure()}
  // Image API billing is all-or-nothing. A received 400 rejects the request;

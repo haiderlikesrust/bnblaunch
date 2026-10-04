@@ -13,7 +13,7 @@ import InfluencerSetup from "./influencer-setup";
 import { agentModel, DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PURPOSE } from "@/lib/agent-models";
 import { blankCoin, type Language } from "@/lib/model";
 import { api, type T } from "@/lib/ui";
-import { creatorFields, creatorInput } from "@/lib/policy";
+import { creatorFields, creatorInput, identityStepInput, agentStepInput } from "@/lib/policy";
 import { PLATFORM_POLICY } from "@/lib/platform-policy";
 import { influencerInput } from "@/lib/influencer-options";
 import { coinTweetUrl } from "@/lib/coin-tweet";
@@ -91,8 +91,8 @@ export default function CreateLaunch({lang,t}:{lang:Language;t:T}){
  }
  async function submit(e:FormEvent){
   e.preventDefault();if(busy||done.current)return;setError("");const value=input();
-  if(step===1){const v=creatorFields.pick({name:true,symbol:true,description:true,language:true}).safeParse(value);if(!v.success)return setError(issues(v.error));if(!tokenImage)return setError(t("请上传代币图片。Flap 发行需要标志。","Add a token image. Flap needs a logo to launch."));}
-  if(step===2){const v=creatorFields.omit({influencer:true}).safeParse(value);if(!v.success)return setError(issues(v.error));}
+  if(step===1){const v=identityStepInput.safeParse(value);if(!v.success)return setError(issues(v.error));if(!tokenImage)return setError(t("请上传代币图片。Flap 发行需要标志。","Add a token image. Flap needs a logo to launch."));}
+  if(step===2){const v=agentStepInput.safeParse(value);if(!v.success)return setError(issues(v.error));}
   if(step===3){const v=creatorInput.safeParse(value);if(!v.success)return setError(issues(v.error));if(value.influencer&&reference&&!consent)return setError(t("请确认你有权使用此参考图。","Confirm you have the right to use this reference image."));}
   store(DRAFT,JSON.stringify({form:value,buy,tweetUrl}));
   if(step<4){setStep(step+1);return}

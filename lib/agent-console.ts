@@ -8,7 +8,7 @@ export async function agentConsole(coin: Coin) {
   const [research, run, content, operation, domain, lease, health, events, memory, tasks, signals, moves, config] = await Promise.all([
     db().prepare('SELECT status,started_at,finished_at FROM research_runs WHERE coin_id=? ORDER BY started_at DESC LIMIT 1').bind(coin.id).first<{ status: string; started_at: number; finished_at: number | null }>(),
     db().prepare("SELECT status,created_at,finished_at,output,EXISTS(SELECT 1 FROM agent_memories WHERE agent_memories.id=agent_runs.id AND agent_memories.coin_id=agent_runs.coin_id) AS approved FROM agent_runs WHERE coin_id=? AND kind='plan' ORDER BY created_at DESC,id DESC LIMIT 1").bind(coin.id).first<{ status: string; created_at: string;finished_at:string|null;output:string|null;approved:boolean|number }>(),
-    db().prepare("SELECT status,updated_at FROM content_jobs WHERE coin_id=? AND status NOT IN ('complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
+    db().prepare("SELECT status,updated_at,next_attempt_at FROM content_jobs WHERE coin_id=? AND status NOT IN ('complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number;next_attempt_at:number }>(),
     db().prepare("SELECT kind,status,created_at FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ kind: string; status: string; created_at: number }>(),
     db().prepare("SELECT status,updated_at FROM domain_orders WHERE coin_id=? AND status NOT IN ('live','complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
     db().prepare('SELECT lease_until,next_run_at,next_plan_at,last_checked_at,last_reason FROM runtime_leases WHERE coin_id=?').bind(coin.id).first<{ lease_until: number; next_run_at: number;next_plan_at:number;last_checked_at:number|null;last_reason:string|null }>(),
@@ -27,7 +27,7 @@ export async function agentConsole(coin: Coin) {
   else if (!capable) state = 'services_unavailable';
   else if (research?.status === 'searching' && now - research.started_at < 120000) { state = 'researching'; changedAt = research.started_at; }
   else if (operation) { state = operation.kind === 'compute' ? 'funding_services' : 'transaction_pending'; changedAt = operation.created_at; }
-  else if (content&&!['uncertain','reconciling'].includes(content.status)) { state = content.status === 'posting' ? 'posting' : content.status === 'generating' ? 'creating_image' : 'publication_queued'; changedAt = content.updated_at; }
+  else if (content&&!(content.status==='queued'&&content.next_attempt_at>now)&&!['uncertain','reconciling'].includes(content.status)) { state = content.status === 'posting' ? 'posting' : content.status === 'generating' ? 'creating_image' : 'publication_queued'; changedAt = content.updated_at; }
   else if (domain) { state = 'domain_pending'; changedAt = domain.updated_at; }
   else if (run?.status === 'reserved') { state = lease && lease.lease_until > now ? 'planning' : 'verification_pending'; changedAt = Date.parse(run.created_at); }
   else if (lease && lease.lease_until > now) state = 'checking';
@@ -40,5 +40,5 @@ export async function agentConsole(coin: Coin) {
   const diagnostic=run?.status==='settled'&&!run.approved?readPlanDiagnostic(run.output):null;
   const lastPlan=run?{outcome:run.approved?'approved':run.status==='reserved'?'pending':'not_approved',startedAt:Date.parse(run.created_at),finishedAt:run.finished_at?Date.parse(run.finished_at):null,rejection:diagnostic?publicPlanDiagnostic(diagnostic):null}:null;
   return { state, changedAt, observedAt: now,lastCheckAt:lease?.last_checked_at??null, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,nextPlanAt:lease?.next_plan_at&&lease.next_plan_at>now?lease.next_plan_at:null,lastPlan,
-    publicationNeedsVerification:!!content&&['uncertain','reconciling'].includes(content.status),tasks,signals,moves:moves.results,treasuryThesis:config?JSON.parse(config.config).treasuryThesis??null:null,memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
+    nextPublicationAt:content?.status==='queued'?content.next_attempt_at:null,publicationNeedsVerification:!!content&&['uncertain','reconciling'].includes(content.status),tasks,signals,moves:moves.results,treasuryThesis:config?JSON.parse(config.config).treasuryThesis??null:null,memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
 }
