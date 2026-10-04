@@ -39,7 +39,7 @@ for(const buy of ['0','0.025'])test(`saved image, raw CID and ${buy} BNB develop
  const salt='0x0f735e321665009d7a32b353ccb4f2f5b7771e33c94c160e20c8be40e1e9f56e',address='0xF1636B3a44350AA4f6A7Ba9A5191D761a4A97777',originalFetch=globalThis.fetch;
  const tweet=buy==='0'?'':'https://x.com/shendotnow/status/123456789';
  let expectedTweet=null;
- let uploadResult=rawCid,uploads=0,balance=100n*10n**18n,revert=false,preparedTransaction,confirmValue,bindings=0;
+ let uploadResult=rawCid,uploads=0,balance=100n*10n**18n,revert=false,preparedTransaction,confirmValue,bindings=0,head="0x103",pending=false,receiptStatus="0x1";
  const txHash="0x"+"c".repeat(64),blockHash="0x"+"d".repeat(64);
  globalThis.fetch=async(input,init)=>{
   const url=String(input instanceof Request?input.url:input);
@@ -58,7 +58,8 @@ for(const buy of ['0','0.025'])test(`saved image, raw CID and ${buy} BNB develop
    if(body.method==='eth_call'||body.method==='eth_estimateGas'){const tx=body.params[0],p=decodeFunctionData({abi:portalAbi,data:tx.data}).args[0];assert.equal(p.dexThresh,1);assert.equal(p.quoteAmt,parseEther(buy));assert.equal(BigInt(tx.value??'0x0'),parseEther(buy));}
    if(revert&&body.method==='eth_call')return Response.json({jsonrpc:'2.0',id:body.id,error:{code:3,message:'execution reverted',data:encodeErrorResult({abi:portalAbi,errorName:'InvalidDexThresholdType',args:[0]})}});
    const tx={hash:txHash,blockHash,blockNumber:'0x100',transactionIndex:'0x0',from:creator.address,to:PORTAL,gas:'0x100000',gasPrice:'0x3b9aca00',nonce:'0x0',input:preparedTransaction?.data??'0x',value:confirmValue??'0x0',type:'0x0',v:'0x1b',r:'0x'+'1'.repeat(64),s:'0x'+'2'.repeat(64)};
-   const results={eth_getTransactionByHash:tx,eth_getTransactionReceipt:{transactionHash:txHash,transactionIndex:'0x0',blockHash,blockNumber:'0x100',from:creator.address,to:PORTAL,cumulativeGasUsed:'0x100000',gasUsed:'0x100000',effectiveGasPrice:'0x3b9aca00',contractAddress:null,logs:[],logsBloom:'0x'+'0'.repeat(512),status:'0x1',type:'0x0'},eth_blockNumber:'0x103',eth_getBalance:'0x'+balance.toString(16),eth_gasPrice:'0x3b9aca00',eth_chainId:'0x38',eth_getCode:'0x',eth_call:encodeAbiParameters([{type:'address'}],[address]),eth_estimateGas:'0x100000'};
+   const results={eth_getTransactionByHash:tx,eth_getTransactionReceipt:{transactionHash:txHash,transactionIndex:'0x0',blockHash,blockNumber:'0x100',from:creator.address,to:PORTAL,cumulativeGasUsed:'0x100000',gasUsed:'0x100000',effectiveGasPrice:'0x3b9aca00',contractAddress:null,logs:[],logsBloom:'0x'+'0'.repeat(512),status:receiptStatus,type:"0x0"},eth_blockNumber:head,eth_getBalance:'0x'+balance.toString(16),eth_gasPrice:'0x3b9aca00',eth_chainId:'0x38',eth_getCode:'0x',eth_call:encodeAbiParameters([{type:'address'}],[address]),eth_estimateGas:'0x100000'};
+   if(pending&&['eth_getTransactionByHash','eth_getTransactionReceipt'].includes(body.method))return Response.json({jsonrpc:'2.0',id:body.id,result:null});
    assert.ok(Object.hasOwn(results,body.method),'Unexpected RPC method: '+body.method);
    return Response.json({jsonrpc:'2.0',id:body.id,result:results[body.method]});
   }
@@ -86,6 +87,9 @@ for(const buy of ['0','0.025'])test(`saved image, raw CID and ${buy} BNB develop
   expectedTweet=null;uploadResult='not-a-cid';const invalid=await metadata(request('metadata',{useSavedImage:true}),context);
   assert.equal(invalid.status,502);assert.match((await invalid.json()).error,/invalid metadata identifier/);
   preparedTransaction=result.transaction;confirmValue='0x'+(parseEther(buy)+1n).toString(16);
+  pending=true;const unmined=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(unmined.status,202);assert.equal((await unmined.json()).status,'pending');pending=false;
+  head='0x101';const waiting=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(waiting.status,202);assert.equal((await waiting.json()).status,'pending');head='0x103';assert.equal(bindings,0);
+  receiptStatus='0x0';const reverted=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(reverted.status,409);receiptStatus='0x1';
   const mismatch=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(mismatch.status,400);assert.equal(bindings,0);
   confirmValue=result.transaction.value;const confirmed=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(confirmed.status,200,await confirmed.clone().text());const launched=(await confirmed.json()).coin;assert.equal(launched.tokenAddress,address);assert.equal(launched.tweetUrl,tweet);assert.equal(publicCoin(launched).tweetUrl,tweet);assert.equal(bindings,1);
  }finally{globalThis.fetch=originalFetch;delete globalThis.__xTestCookies;sql.close()}

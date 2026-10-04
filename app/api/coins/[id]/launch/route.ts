@@ -5,7 +5,7 @@ import { chainClient } from "@/lib/providers";
 import { agentWallet, launchReadiness, requireLaunchReady, signerRequest } from "@/lib/signer";
 import { AppError, body, db, failure, identity, ownedCoin, response } from "@/lib/server";
 import { requestOrigin } from "@/lib/auth";
-import { initialBuyBnb, launchError } from "@/lib/launch-validation";
+import { initialBuyBnb, launchError, LaunchPendingError } from "@/lib/launch-validation";
 import { coinTweetUrl } from "@/lib/coin-tweet";
 import { metadataCid } from "@/lib/metadata-cid";
 
@@ -36,7 +36,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
       if(await client.getChainId()!==56)throw new AppError(503,"RPC does not point to BNB Chain.");
       const [tx,receipt,block]=await Promise.all([client.getTransaction({hash}),client.getTransactionReceipt({hash}),client.getBlockNumber()]);
       if(receipt.status!=="success")throw new AppError(409,"Transaction reverted; no launch recorded.");
-      if(block-receipt.blockNumber<3n)throw new AppError(409,"Waiting for 3 confirmations. Check again shortly.");
+      if(block-receipt.blockNumber<3n)throw new LaunchPendingError(202,"Confirming launch on BNB Chain… Waiting for 3 confirmations.");
       if(tx.to?.toLowerCase()!==PORTAL.toLowerCase()||tx.from.toLowerCase()!==plan.creator.toLowerCase()||tx.input!==plan.calldata||tx.value!==BigInt(plan.initial_buy_wei))throw new AppError(400,"Transaction does not match the saved launch plan.");
       // The signer independently checks canonical receipt, token implementation,
       // beneficiary and tax routing before binding this wallet permanently.
@@ -90,5 +90,5 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
     const saved=await db().prepare("SELECT calldata FROM prepared_launches WHERE id=?").bind(v.authorizationId).first<{calldata:string}>();
     if(saved?.calldata!==calldata)throw new AppError(409,"This authorization was already used for a different plan.");
     return response({planId:v.authorizationId,transaction:{from:auth.creator,to:PORTAL,data:calldata,value:toHex(buyWei),chainId:"0x38",gas:toHex(gasLimit)},initialBuyBnb:formatEther(buyWei),estimatedGasBnb:formatEther(gasLimit*gasPrice),predictedAddress:predicted,treasury,preflight:"passed",agentWalletReady:true});
-  }catch(e){return failure(launchError(e,stage))}
+  }catch(e){const error=launchError(e,stage);if(stage==="confirmation"&&error instanceof LaunchPendingError)return response({status:"pending",message:error.message},202);return failure(error)}
 }
