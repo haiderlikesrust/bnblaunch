@@ -8,7 +8,7 @@ export function failureCode(error){
 export async function serviceRequest(base,path,token,data,siteAccessToken){
   let response;
   try{
-    response=await fetch(new URL(path,base),{method:data===undefined?'GET':'POST',redirect:'error',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',...(siteAccessToken?{'OAI-Sites-Authorization':'Bearer '+siteAccessToken}:{})},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(path==='/api/internal/worker'&&data?.action==='tick'?420000:180000)});
+    response=await fetch(new URL(path,base),{method:data===undefined?'GET':'POST',redirect:'error',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',...(siteAccessToken?{'OAI-Sites-Authorization':'Bearer '+siteAccessToken}:{})},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(path==='/api/internal/worker'&&data?.action==='tick'?420000:path==='/api/internal/worker'&&data?.action==='influencer'?300000:180000)});
   }catch(error){throw new WorkerRequestError(error?.name==='TimeoutError'?'TIMEOUT':'NETWORK_ERROR');}
   if(!response.ok)throw new WorkerRequestError('HTTP_'+response.status);
   try{return await response.json();}catch{throw new WorkerRequestError('INVALID_JSON');}

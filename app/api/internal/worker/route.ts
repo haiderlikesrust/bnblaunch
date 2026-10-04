@@ -8,14 +8,38 @@ import { chainClient } from "@/lib/providers";
 import type { Hex } from "viem";
 import { domainFundingRequests, runDomainTick } from '@/lib/domain-runtime';
 import { runContentTick } from '@/lib/content-runtime';
+import { runInfluencerTick } from '@/lib/influencer-runtime';
 
-export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast') ORDER BY created_at LIMIT 20").all();return response({operations:ops.results,domainFunding:await domainFundingRequests()});}catch(e){return failure(e)}}
-const payload=z.discriminatedUnion("action",[z.object({action:z.literal("index")}).strict(),z.object({action:z.literal("domains")}).strict(),z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
+// The influencer reuses the capabilities the agent tick last verified.
+async function recordedCapabilities(){
+  const row=await db().prepare("SELECT checked_at,capabilities FROM runtime_health WHERE id='worker'").first<{checked_at:number;capabilities:string}>();
+  if(!row||Date.now()-row.checked_at>600000)return [];
+  try{const value=JSON.parse(row.capabilities);return Array.isArray(value)?value.filter((v):v is string=>typeof v==='string'):[];}catch{return []}
+}
+
+// Checks that make no paid model call; several share one worker pass.
+const CHEAP=new Set(['awaiting_treasury_funding','transaction_pending','provider_cost_reconciliation_required','domain_payment_pending','awaiting_next_plan','awaiting_service_funding','service_payment_queued','service_deposit_minimum_or_collateral_required','fee_verification_failed','historical_rpc_required','rpc_log_limit','fee_audit_pending','coin_unavailable']);
+// Unsigned operations expire in minutes, so they go first; long-running ones
+// rotate randomly so a few stuck campaigns cannot starve newer coins.
+export async function GET(request:Request){try{await requireWorker(request);const ops=await db().prepare("SELECT id,coin_id AS coinId,kind,amount_wei AS amountWei,expires_at AS expiresAt,status,tx_hash AS hash FROM agent_operations WHERE status IN ('queued','signed','broadcast') ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END,random() LIMIT 30").all();return response({operations:ops.results,domainFunding:await domainFundingRequests()});}catch(e){return failure(e)}}
+const payload=z.discriminatedUnion("action",[z.object({action:z.literal("content")}).strict(),z.object({action:z.literal("index")}).strict(),z.object({action:z.literal("domains")}).strict(),z.object({action:z.literal("influencer")}).strict(),z.object({action:z.literal("tick")}).strict(),z.object({action:z.literal("reconcile"),id:z.string().uuid()}).strict()]);
 export async function POST(request:Request){try{
   await requireWorker(request);const input=payload.parse(await body(request));
+  if(input.action==="content")return response(await runContentTick());
   if(input.action==="index")return response(await runCurveTick());
   if(input.action==="domains")return response(await runDomainTick());
-  if(input.action==="tick"){const capabilities=await refreshRuntimeHealth();if(!capabilities.includes('autonomous-planning'))return response({processed:false,reason:'runtime_configuration_required'});const content=await runContentTick();return response(content.processed?content:await runAgentTick(capabilities));}
+  if(input.action==="influencer")return response(await runInfluencerTick(await recordedCapabilities()));
+  if(input.action==="tick"){
+    const capabilities=await refreshRuntimeHealth();if(!capabilities.includes('autonomous-planning'))return response({processed:false,reason:'runtime_configuration_required'});
+    // Publication processing has its own worker action so it cannot starve planning.
+    // Cheap wallet checks for several coins share a pass; a paid planning
+    // cycle (or any rejection) ends it, so one coin cannot delay the rest.
+    const started=Date.now();let result:Awaited<ReturnType<typeof runAgentTick>>=await runAgentTick(capabilities);
+    for(let i=1;i<10&&Date.now()-started<45000&&result.processed&&CHEAP.has(result.reason)&&!('rejection' in result&&result.rejection);i++){
+      try{const next=await runAgentTick(capabilities);if(!next.processed)break;result=next;}catch{break;}
+    }
+    return response(result);
+  }
   const op=await db().prepare("SELECT * FROM agent_operations WHERE id=?").bind(input.id).first<{id:string;coin_id:string;kind:string;amount_wei:string;status:string;created_at:number;expires_at:number}>();
   if(!op)throw new AppError(404,"Operation not found.");
   if(["confirmed","reverted","expired","partial","failed"].includes(op.status))return response({status:op.status});

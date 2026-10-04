@@ -8,6 +8,7 @@ const app=new URL(env.SHEN_APP_URL),signer=new URL(env.SIGNER_INTERNAL_URL??'htt
 if((app.protocol!=='https:'&&!(app.protocol==='http:'&&app.hostname==='web'&&app.port==='3000'))||app.username||app.password) throw Error('Only the private web service may use HTTP');
 if(signer.protocol!=='https:'&&!(signer.protocol==='http:'&&signer.hostname==='signer')) throw Error('Only the private signer service may use HTTP');
 let stopping=false,lastSuccess=0,stage='starting',tickStarted=0;
+let influencerPass=null,contentPass=null;
 async function request(base,path,token,data,site=false){
   return serviceRequest(base,path,token,data,site?env.SHEN_SITE_ACCESS_TOKEN:undefined);
 }
@@ -42,11 +43,16 @@ async function cycle(){
     }catch{console.warn('An agent operation awaits reconciliation. Its existing ID is retained.');}
     try{await site({action:'reconcile',id:op.id});}catch{console.warn('Operation settlement is pending.');}
   }
-  stage='domain_tick';await site({action:'domains'});
+  stage='domain_tick';try{await site({action:'domains'});}catch(error){console.warn(`Domain check failed [${failureCode(error)}].`);}
+  // At most one pass of each optional service runs alongside planning.
+  // Slow media must not add minutes to every agent's work cycle.
+  if(!influencerPass)influencerPass=site({action:'influencer'}).catch(error=>console.warn(`Influencer media check failed [${failureCode(error)}].`)).finally(()=>{influencerPass=null;});
+  if(!contentPass)contentPass=site({action:'content'}).catch(error=>console.warn(`Community publishing check failed [${failureCode(error)}].`)).finally(()=>{contentPass=null;});
   stage='agent_tick';tickStarted=Date.now();const tick=await site({action:'tick'});lastSuccess=Date.now();
   if(tick?.rejection)console.warn(`Agent plan rejected [${tick.rejection.code}]: ${tick.rejection.message}`);
 }
-const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000||(stage==='agent_tick'&&Date.now()-tickStarted<450000);res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});
+const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000||(['agent_tick','influencer_tick'].includes(stage)&&Date.now()-tickStarted<450000);res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});
 health.listen(Number(env.PORT??8081),'0.0.0.0');
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{stopping=true;health.close();});
 while(!stopping){try{await cycle();}catch(error){console.warn(`Agent worker failed [${stage}/${failureCode(error)}]. No success has been recorded.`);}if(!stopping)await delay(15000);}
+await Promise.allSettled([influencerPass,contentPass].filter(Boolean));

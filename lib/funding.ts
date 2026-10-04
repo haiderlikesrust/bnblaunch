@@ -6,7 +6,17 @@ import { chainClient } from "./providers";
 // Standard BNB/USD feed, distinct from the 18-decimal SVR feed.
 const FEED="0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE";
 const abi=parseAbi(["function decimals() view returns(uint8)","function latestRoundData() view returns(uint80 roundId,int256 answer,uint256 startedAt,uint256 updatedAt,uint80 answeredInRound)"]);
+// The latest price is shared for 30 seconds (still inside the feed's 120-second
+// freshness rule), so public chart traffic cannot exhaust the signer's RPC quota.
+// Block-pinned settlement reads are never cached.
+let latestPrice:{value:Awaited<ReturnType<typeof readPrice>>;expires:number}|undefined,priceRequest:Promise<Awaited<ReturnType<typeof readPrice>>>|undefined;
 export async function bnbPrice(blockNumber?:bigint){
+  if(blockNumber!==undefined)return readPrice(blockNumber);
+  if(latestPrice&&latestPrice.expires>Date.now())return latestPrice.value;
+  priceRequest??=readPrice().then(value=>{latestPrice={value,expires:Date.now()+30000};return value}).finally(()=>{priceRequest=undefined});
+  return priceRequest;
+}
+async function readPrice(blockNumber?:bigint){
   const client=chainClient();
   if(await client.getChainId()!==56)throw new AppError(503,"Incorrect funding chain.");
   const [block,decimals,round]=await Promise.all([client.getBlock(blockNumber?{blockNumber}:{}),client.readContract({address:FEED,abi,functionName:"decimals",blockNumber}),client.readContract({address:FEED,abi,functionName:"latestRoundData",blockNumber})]);

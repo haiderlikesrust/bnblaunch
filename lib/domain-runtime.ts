@@ -55,6 +55,8 @@ export async function runDomainTick(injected?:Dependencies){
   const update=async(fields:string,...values:unknown[])=>{const saved=await db().prepare(`UPDATE domain_orders SET ${fields},updated_at=? WHERE id=? AND ${guard}`).bind(...values,Date.now(),j.id,fence,Date.now()).run();if(!saved.meta.changes)throw new AppError(409,'Domain lease expired.');return saved;};
   const next=async(status:string,delay=15000)=>update('status=?,next_attempt_at=?,last_error=NULL',status,Date.now()+delay);
   const fail=async(code:string)=>update("status='failed',reserved_cents=0,last_error=?",code);
+  // Unstarted orders cannot wait forever; credit already received stays this coin's.
+  if((j.status==='queued'&&j.created_at<Date.now()-DAY)||(j.status==='reserve'&&(j.funding_expires_at??j.created_at+DAY)<Date.now()-DAY)){await fail(j.status==='queued'?'QUEUED_ORDER_EXPIRED':'RESERVE_EXPIRED');return {processed:true,reason:'domain_order_expired'};}
   if(j.status==='queued'){
    // Verify the configured hosting deployment before spending on a new name.
    // Renewals may preserve an existing registration during a hosting outage.
@@ -71,7 +73,7 @@ export async function runDomainTick(injected?:Dependencies){
    await update('cost_cents=?,funding_cents=?,minimum_credit_cents=?,funding_expires_at=?,status=?,next_attempt_at=?',quote.costCents,topup,shortfall,Date.now()+DAY,topup?'funding':'reserve',Date.now());
   }else if(j.status==='funding'){
    const receipt=await d.funding(j.id);
-   if(!receipt){if(j.funding_expires_at!<=Date.now())await fail('UNSTARTED_FUNDING_EXPIRED');return {processed:true,reason:'awaiting_domain_funding_worker'};}
+   if(!receipt){if(j.funding_expires_at!<=Date.now())await fail('UNSTARTED_FUNDING_EXPIRED');else await update('next_attempt_at=?',Date.now()+60000);return {processed:true,reason:'awaiting_domain_funding_worker'};}
    if(receipt.id!==j.id||receipt.coinId!==j.coin_id||receipt.amountCents!==j.funding_cents)throw new AppError(503,'Domain funding journal mismatch.');
    if(receipt.credited){
     if(!receipt.checkoutId||!Number.isSafeInteger(receipt.creditedMicrousd)||receipt.creditedMicrousd<=0||receipt.creditedMicrousd>j.funding_cents*10000||receipt.creditedMicrousd%10000)throw new AppError(503,'Invalid registrar credit evidence.');
@@ -133,6 +135,11 @@ export async function runDomainTick(injected?:Dependencies){
   }else if(j.status==='verify'||j.status==='live'){
    const mapped=await db().prepare('SELECT * FROM coin_domains WHERE coin_id=? AND domain=?').bind(j.coin_id,j.domain).first<DomainRow>();
    if(!mapped)throw new AppError(503,'Domain mapping is pending.');
+   if(j.status==='live'&&mapped.order_id!==j.id){await update("status='superseded',next_attempt_at=?",Date.now());return {processed:true,reason:'domain_superseded'};}
+   if(mapped.expires_at!==null&&mapped.expires_at<=Date.now()){
+    await db().prepare(`UPDATE coin_domains SET state='expired',last_error='REGISTRATION_EXPIRED',updated_at=? WHERE coin_id=? AND domain=? AND ${guard}`).bind(Date.now(),j.coin_id,j.domain,fence,Date.now()).run();
+    await update("status='expired',next_attempt_at=?",Date.now());return {processed:true,reason:'domain_expired'};
+   }
    const result=await d.host.verifySite(j.domain,j.coin_id,mapped.verification_token);
    await db().prepare(`UPDATE coin_domains SET state=?,last_error=?,updated_at=? WHERE coin_id=? AND domain=? AND ${guard}`).bind(result.live?'live':mapped.state==='live'||mapped.state==='degraded'?'degraded':'provisioning',result.live?null:'DNS_OR_HTTPS_PENDING',Date.now(),j.coin_id,j.domain,fence,Date.now()).run();
    await next(result.live?'live':'verify',result.live?6*3600000:300000);

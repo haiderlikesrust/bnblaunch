@@ -6,7 +6,7 @@ globalThis.__shenTestEnv={OPENROUTER_API_KEY:'test',DB:{prepare(){return {bind()
 const {AGENT_MODELS}=await import('../lib/agent-models.ts');
 const {chatPrice,chatCompletion}=await import('../lib/chat-completion.ts');
 
-test('planning uses only catalog-supported low reasoning and keeps ordinary chat unchanged',async()=>{
+test('planning and chat use only catalog-supported low reasoning',async()=>{
  const original=globalThis.fetch,bodies=[];
  const options=[
   {supported_parameters:['response_format','reasoning'],reasoning:{mandatory:true,supported_efforts:['max','high','low']}},
@@ -26,7 +26,10 @@ test('planning uses only catalog-supported low reasoning and keeps ordinary chat
    assert.deepEqual(bodies.at(-1).reasoning,i<2?{effort:'low'}:undefined);
    assert.equal(bodies.at(-1).max_tokens,8192);assert.equal(bodies.at(-1).provider.require_parameters,true);
   }
+  // Chat shares its 800-token budget with reasoning, so it asks for low effort too.
   await chatCompletion(await chatPrice(AGENT_MODELS[0].id),'Return JSON.',{});
-  assert.equal(bodies.at(-1).reasoning,undefined);assert.equal(bodies.at(-1).max_tokens,800);
+  assert.deepEqual(bodies.at(-1).reasoning,{effort:'low'});assert.equal(bodies.at(-1).max_tokens,800);
+  await chatCompletion(await chatPrice(AGENT_MODELS[3].id),'Return JSON.',{});
+  assert.equal(bodies.at(-1).reasoning,undefined,'models without a low-effort option get no reasoning parameter');
  }finally{globalThis.fetch=original;}
 });

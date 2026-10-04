@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { validSecretKey, openServiceSecret, sealServiceSecret } from '../shared/service-secrets.mjs';
 import { db, AppError } from './server';
 import { exchangeXToken, type XTokens } from './x-official';
+import { XConnectionError } from './x-connection-result';
 import twitterText from 'twitter-text';
 export function xConfigured(){return !!env.X_CLIENT_ID&&!!env.X_CLIENT_SECRET&&!!env.X_API_BEARER_TOKEN&&validSecretKey(env.SERVICE_CREDENTIALS_KEY)}
 export function xCosts(text=''){
@@ -30,5 +31,13 @@ export async function xSession(account:XAccount):Promise<XTokens>{
   const saved=await db().prepare("UPDATE x_accounts SET encrypted_session=?,version=?,refresh_status='idle',updated_at=? WHERE coin_id=? AND version=? AND refresh_status='refreshing'").bind(encrypted,version,Date.now(),account.coin_id,account.version).run();
   if(!saved.meta.changes)throw new AppError(409,'X connection changed during refresh.');
   account.version=version;return refreshed;
- }catch{await revokeXSession(account);throw new AppError(412,'Reconnect this account with X.');}
+ }catch(error){
+  // A rejected client or a rate limit happens before X spends the single-use
+  // refresh token, so the connection stays valid and the refresh retries later.
+  if(error instanceof XConnectionError&&(error.code==='oauth_client'||error.code==='rate_limited')){
+   await db().prepare("UPDATE x_accounts SET refresh_status='idle',updated_at=? WHERE coin_id=? AND version=? AND refresh_status='refreshing'").bind(Date.now(),account.coin_id,account.version).run();
+   throw new AppError(409,'X access could not be refreshed right now. It will retry.');
+  }
+  await revokeXSession(account);throw new AppError(412,'Reconnect this account with X.');
+ }
 }

@@ -18,6 +18,9 @@ const usdcAbi=parseAbi(['function balanceOf(address) view returns(uint256)','fun
 const usdcEvents=parseAbi(['event Transfer(address indexed from,address indexed to,uint256 value)','event AuthorizationUsed(address indexed authorizer,bytes32 indexed nonce)']);
 const authTypes={TransferWithAuthorization:[{name:'from',type:'address'},{name:'to',type:'address'},{name:'value',type:'uint256'},{name:'validAfter',type:'uint256'},{name:'validBefore',type:'uint256'},{name:'nonce',type:'bytes32'}]};
 const authDomain={name:'USD Coin',version:'2',chainId:8453,verifyingContract:BASE_USDC};
+// Standard Chainlink BNB/USD feed on BNB Chain, also used by the web's credit valuation.
+const BNB_USD_FEED='0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE';
+const feedAbi=parseAbi(['function decimals() view returns(uint8)','function latestRoundData() view returns(uint80 roundId,int256 answer,uint256 startedAt,uint256 updatedAt,uint80 answeredInRound)']);
 function requireThat(value,message){if(!value)throw Error(message);}
 function uint(value){requireThat(typeof value==='string'&&/^(0|[1-9]\d{0,77})$/.test(value),'Invalid integer amount');return BigInt(value);}
 function assertKeys(value,keys){requireThat(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(k=>keys.includes(k)),'Unexpected funding input field');}
@@ -74,9 +77,13 @@ export function validateX402(challenge,{url,amountCents}){
  return {version,accepted,resource:version===2?challenge.resource:undefined};
 }
 
+// Other wallet spending waits while BNB is reserved for or moving through the
+// bridge. Once BNB has left (USDC-side states) or a job awaits reconciliation,
+// the wallet is not frozen; the per-coin unique index still blocks new funding.
+// Unknown states block by default.
 export function hasPendingDomainBridge(store,coinId){
  if(!store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='domain_funding_jobs'").get())return false;
- return !!store.db.prepare("SELECT id FROM domain_funding_jobs WHERE coin_id=? AND status NOT IN ('complete','failed')").get(coinId);
+ return !!store.db.prepare("SELECT id FROM domain_funding_jobs WHERE coin_id=? AND status NOT IN ('complete','failed','needs_reconciliation','bridged','authorized','payment_sending','paid')").get(coinId);
 }
 
 export class DomainFunding {
@@ -113,6 +120,14 @@ export class DomainFunding {
   requireThat(response.ok,'Registrar funding response unavailable');requireThat(!['true','1'].includes(response.headers.get('x-porkbun-sandbox')?.toLowerCase())&&!['true','1'].includes(response.headers.get('x-porkbun-mock')?.toLowerCase()),'Sandbox registrar response rejected');
   const text=await response.text();requireThat(text.length<=262144,'Registrar funding response too large');const result=JSON.parse(text);requireThat(result.sandbox!==true&&result.mock!==true,'Sandbox registrar response rejected');return result;
  }
+ // Relay's BNB input may not exceed the oracle price for the USDC out by more
+ // than 8% plus $1 of bridge fees, whatever ceiling the agent proposed.
+ async fairBridgeCeiling(amountUsdc){
+  const [decimals,round]=await Promise.all([this.bnb.readContract({address:BNB_USD_FEED,abi:feedAbi,functionName:'decimals'}),this.bnb.readContract({address:BNB_USD_FEED,abi:feedAbi,functionName:'latestRoundData'})]);
+  const answer=BigInt(round[1]),updatedAt=Number(round[3]);
+  requireThat(Number(decimals)===8&&answer>0n&&updatedAt>0&&Date.now()/1000-updatedAt<3600&&BigInt(round[4])>=BigInt(round[0]),'BNB price feed is unavailable or stale');
+  return uint(amountUsdc)*10n**20n/answer*108n/100n+10n**26n/answer;
+ }
  async head(client,id){requireThat(await client.getChainId()===id,'Funding RPC chain mismatch');const head=await client.getBlock();requireThat(head.number>=3n&&Math.abs(Date.now()/1000-Number(head.timestamp))<90,'Funding RPC head is stale');return head;}
  async baseBalance(address){const head=await this.head(this.base,8453),block=await this.base.getBlock({blockNumber:head.number-3n});const value=await this.base.readContract({address:BASE_USDC,abi:usdcAbi,functionName:'balanceOf',args:[address],blockNumber:block.number});requireThat((await this.base.getBlock({blockNumber:block.number})).hash===block.hash,'Base balance reorganized');return value;}
  async confirmedUsdcTransfer(hash,to,minimum,from){
@@ -146,15 +161,20 @@ export class DomainFunding {
     const body={user:wallet.address,recipient:wallet.address,refundTo:wallet.address,originChainId:56,destinationChainId:8453,originCurrency:zeroAddress,destinationCurrency:BASE_USDC,tradeType:'EXACT_OUTPUT',amount:amountUsdc,explicitDeposit:true,includeProtocolData:true,useDepositAddress:false,useExternalLiquidity:false,useFallbacks:false,slippageTolerance:'50'};
     const quote=await this.json(RELAY+'/quote/v2',{method:'POST',headers:{'Content-Type':'application/json',...(this.policy.relayApiKey?{'x-api-key':this.policy.relayApiKey}:{})},body:JSON.stringify(body)});
     const bridge=await validateRelayQuote(quote,{payer:wallet.address,amountUsdc,maxBnbWei:input.maxBnbWei,expiresAt:Math.min(input.expiresAt,r.checkout.expiresAt)},this.getOrderId);
+    requireThat(uint(bridge.value)<=await this.fairBridgeCeiling(amountUsdc),'Relay quote exceeds the fair BNB price for this payment');
     this.save(row,fence,'quoted',{...r,quote,quoteObtainedAt:Date.now(),bridge,amountUsdc,baseBefore:balance.toString()});return this.status(id);
    }
    if(row.status==='quoted'){
     if(r.bridge.deadline*1000<Date.now()+30000||!Number.isSafeInteger(r.quoteObtainedAt)||Date.now()-r.quoteObtainedAt>90000){this.save(row,fence,'checkout',{...r,quote:undefined,bridge:undefined});return this.status(id);}
     requireThat(!this.store.pending(row.coin_id),'Agent transaction is still pending');
     const bridge=await validateRelayQuote(r.quote,{payer:wallet.address,amountUsdc:r.amountUsdc,maxBnbWei:input.maxBnbWei,expiresAt:Math.min(input.expiresAt,r.checkout.expiresAt)},this.getOrderId);
+    requireThat(uint(bridge.value)<=await this.fairBridgeCeiling(r.amountUsdc),'Relay quote exceeds the fair BNB price for this payment');
     const head=await this.head(this.bnb,56),transaction={to:bridge.to,value:uint(bridge.value),data:bridge.data};
     const [nonce,latest,balance,confirmed,gasPrice,estimate]=await Promise.all([this.bnb.getTransactionCount({address:wallet.address,blockTag:'pending'}),this.bnb.getTransactionCount({address:wallet.address,blockTag:'latest'}),this.bnb.getBalance({address:wallet.address,blockTag:'pending'}),this.bnb.getBalance({address:wallet.address,blockNumber:head.number-3n}),this.bnb.getGasPrice(),this.bnb.estimateGas({account:wallet.address,...transaction})]);
-    requireThat(nonce===latest&&Number.isSafeInteger(nonce),'Untracked pending BNB nonce');const gas=estimate*120n/100n;
+    requireThat(nonce===latest&&Number.isSafeInteger(nonce),'Untracked pending BNB nonce');
+    // A lagging RPC must not hand back a nonce this signer already used.
+    const recorded=this.store.db.prepare('SELECT MAX(n) AS n FROM (SELECT MAX(nonce) AS n FROM intents WHERE coin_id=? UNION ALL SELECT MAX(nonce) AS n FROM domain_funding_jobs WHERE coin_id=?)').get(row.coin_id,row.coin_id)?.n;
+    requireThat(recorded===null||recorded===undefined||nonce>Number(recorded),'BNB nonce is behind this wallet journal');const gas=estimate*120n/100n;
     requireThat(gasPrice>0n&&gasPrice<=BigInt(this.policy.maxGasPriceWei)&&gas>0n&&gas<=200000n,'Bridge gas exceeds policy');
     requireThat(transaction.value+gas*gasPrice<=uint(input.maxBnbWei),'Bridge amount plus maximum gas exceeds the authorized BNB budget');
     requireThat((balance<confirmed?balance:confirmed)>=transaction.value+gas*gasPrice+BigInt(this.policy.gasReserveWei)+await this.protocolReserve(wallet),'Insufficient confirmed BNB for bridge, gas and protocol reserves');
@@ -172,6 +192,13 @@ export class DomainFunding {
      if(receipt.status!=='success'){this.save(row,fence,'failed',{...r,reason:'Bridge source transaction reverted'});return this.status(id);}
      this.save(row,fence,'awaiting_usdc',{...r,bridgeBlock:receipt.blockNumber.toString(),bridgeBlockHash:receipt.blockHash});return this.status(id);
     }
+    // If another transaction consumed this nonce, these bytes can never be mined.
+    // That must hold for ten minutes before the job fails without moving BNB.
+    if(row.status==='broadcast'&&await this.bnb.getTransactionCount({address:wallet.address,blockTag:'latest'})>row.nonce){
+     if(!r.nonceConsumedAt){this.save(row,fence,'broadcast',{...r,nonceConsumedAt:Date.now()});return this.status(id);}
+     if(Date.now()-r.nonceConsumedAt>600000){this.save(row,fence,'failed',{...r,reason:'Bridge nonce was used by another transaction; no bridge payment was sent'});return this.status(id);}
+     return this.status(id);
+    }
     // Persist a broadcast state before the network call. Retry only these same
     // signed bytes; never create a replacement quote or transaction after this.
     row=this.save(row,fence,'broadcast',r);const raw=this.store.open(r.rawTx,'domain-bridge:'+id);requireThat(keccak256(raw)===r.bridgeHash,'Bridge journal hash mismatch');
@@ -181,7 +208,7 @@ export class DomainFunding {
    if(row.status==='awaiting_usdc'){
     const result=await this.json(RELAY+'/intents/status/v3?requestId='+r.bridge.requestId,{headers:this.policy.relayApiKey?{'x-api-key':this.policy.relayApiKey}:{}});
     if(['refund','failure'].includes(result.status)){this.save(row,fence,'needs_reconciliation',{...r,reason:'Relay reported a refund or failed fill; verify retained funds before retrying'});return this.status(id);}
-    if(result.status!=='success')return this.status(id);
+    if(result.status!=='success'){if(Number.isSafeInteger(r.awaitingSince)&&Date.now()-r.awaitingSince>21600000)this.save(row,fence,'needs_reconciliation',{...r,reason:'Relay fill was not confirmed within six hours'});else if(!r.awaitingSince)this.save(row,fence,'awaiting_usdc',{...r,awaitingSince:Date.now()});return this.status(id);}
     requireThat(result.originChainId===56&&result.destinationChainId===8453&&Array.isArray(result.inTxHashes)&&result.inTxHashes.some(hash=>same(hash,r.bridgeHash))&&Array.isArray(result.txHashes)&&result.txHashes.length>0&&result.txHashes.length<=8,'Relay fill identity mismatch');
     let fillHash;for(const hash of result.txHashes)if(await this.confirmedUsdcTransfer(hash,wallet.address,BigInt(r.amountUsdc))){fillHash=hash;break;}
     if(!fillHash)return this.status(id);
@@ -215,8 +242,9 @@ export class DomainFunding {
     const status=await this.porkbun('/account/topupCryptoStatus/'+encodeURIComponent(r.checkout.id));
     requireThat(status?.status==='SUCCESS'&&status.checkoutId===r.checkout.id&&['ACTIVE','PROCESSING','COMPLETED','EXPIRED','FAILED','DEACTIVATED'].includes(status.state),'Porkbun checkout reconciliation mismatch');
     if(status.state==='COMPLETED'&&status.credited===true){
-     const head=await this.head(this.base,8453),fromBlock=BigInt(r.paymentStartBlock),toBlock=head.number-3n;
-     if(toBlock-fromBlock>10000n){this.save(row,fence,'needs_reconciliation',{...r,reason:'Payment receipt exceeds bounded reconciliation window'});return this.status(id);}
+     // The authorization is valid for at most five minutes after paymentStartBlock,
+     // so its receipt lies in a short, fixed window however late this check runs.
+     const head=await this.head(this.base,8453),fromBlock=BigInt(r.paymentStartBlock),confirmed=head.number-3n,windowEnd=fromBlock+2000n,toBlock=confirmed<windowEnd?confirmed:windowEnd;
      requireThat(toBlock>=fromBlock,'Base confirmation head regressed');const events=[];
      for(let start=fromBlock;start<=toBlock;start+=2000n)events.push(...await this.base.getLogs({address:BASE_USDC,event:usdcEvents[1],args:{authorizer:wallet.address,nonce:r.authNonce},fromBlock:start,toBlock:start+1999n<toBlock?start+1999n:toBlock,strict:true}));
      requireThat(events.length<=1,'Ambiguous USDC authorization receipt');if(!events.length)return this.status(id);

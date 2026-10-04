@@ -1,8 +1,19 @@
 import { z } from 'zod';
-import { parseEther, ContractFunctionRevertedError, BaseError } from 'viem';
+import { parseEther, ContractFunctionRevertedError, BaseError, type Address, type Hex, type PublicClient } from 'viem';
 import { AppError } from './server';
 
 export class LaunchPendingError extends AppError {}
+
+const NOT_FOUND=['TransactionReceiptNotFoundError','TransactionNotFoundError'];
+const notFound=(error:unknown)=>error instanceof BaseError&&!!error.walk(e=>e instanceof Error&&NOT_FOUND.includes(e.name));
+// A launch whose hash is unknown but whose predicted token exists was replaced
+// in the wallet (sped up or re-sent) with identical calldata.
+export async function launchTransactionState(client:Pick<PublicClient,'getTransactionReceipt'|'getTransaction'|'getCode'>,hash:Hex,predicted:Address):Promise<'success'|'reverted'|'pending'|'missing'|'replaced'>{
+ try{const receipt=await client.getTransactionReceipt({hash});return receipt.status==='success'?'success':'reverted';}catch(error){if(!notFound(error))throw error;}
+ try{await client.getTransaction({hash});return 'pending';}catch(error){if(!notFound(error))throw error;}
+ const code=await client.getCode({address:predicted});
+ return code&&code!=='0x'?'replaced':'missing';
+}
 
 export const initialBuyBnb=z.string().max(80).regex(/^(0|[1-9]\d*)(\.\d{1,18})?$/, 'Enter a non-negative BNB amount with at most 18 decimal places.').refine(value=>{
  try{return parseEther(value)<2n**256n}catch{return false}

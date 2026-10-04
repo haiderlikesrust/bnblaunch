@@ -29,7 +29,8 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
   if(!row)throw new AppError(404,"Coin not found.");
   const coin=JSON.parse(row.config) as Coin;
   if(obviousInstruction(message))return response({answer:CHAT_REFUSAL[coin.language],blocked:true});
-  if(!coin.tokenAddress||coin.state==="paused"||coin.balance<coin.threshold)throw new AppError(412,"The agent is not funded and available yet. Chat opens after launch and activation funding.");
+  // Questions are paid from prepaid service credit, checked by the window below.
+  if(!coin.tokenAddress||coin.state==="paused")throw new AppError(412,"The agent is not funded and available yet. Chat opens after launch and activation funding.");
   if(!env.OPENROUTER_API_KEY||row.ai_credit_microusd<=0)throw new AppError(412,"Live chat awaits AI service setup and confirmed funding.");
   const window=await availability(coin,row);
   if(!window.open||!window.closesAt)return response({error:"Chat is currently closed to conserve service funds. The next session depends on available funding.",window},423);

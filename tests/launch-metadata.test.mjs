@@ -12,7 +12,7 @@ import {metadataCid} from '../lib/metadata-cid.ts';
 register('./x-oauth-loader.mjs',import.meta.url);
 const env=globalThis.__shenTestEnv={APP_ORIGIN:'https://shen.now',SHEN_RUNTIME:'node',SIGNER_URL:'http://signer:8080',SIGNER_WEB_TOKEN:'a'.repeat(48),BNB_RPC_URL:'https://rpc.invalid'};
 const {POST:metadata}=await import('../app/api/coins/[id]/metadata/route.ts');
-const {POST:launch}=await import('../app/api/coins/[id]/launch/route.ts');
+const {POST:launch,GET:launchGET}=await import('../app/api/coins/[id]/launch/route.ts');
 const {publicCoin}=await import('../lib/public-coin.ts');
 const {blankCoin}=await import('../lib/model.ts');
 const {portalAbi,PORTAL}=await import('../lib/flap.ts');
@@ -77,6 +77,8 @@ for(const buy of ['0','0.025'])test(`saved image, raw CID and ${buy} BNB develop
   assert.equal(uploaded.status,200);const {cid}=await uploaded.json();assert.equal(cid,rawCid);
   const payload={action:'prepare',authorizationId:auth.authorizationId,signature,cid,salt};
   const tampered=await launch(request('launch',{...payload,initialBuyBnb:'9'}),context);assert.equal(tampered.status,400);
+  // A self-pinned CID (different website, links or art) is never accepted.
+  const unbound=await launch(request('launch',{...payload,cid:dagCid}),context);assert.equal(unbound.status,409);assert.match((await unbound.json()).error,/metadata does not match/);
   balance=0n;const insufficient=await launch(request('launch',payload),context);assert.equal(insufficient.status,422);assert.match((await insufficient.json()).error,/enough BNB/);
   balance=100n*10n**18n;revert=true;const rejected=await launch(request('launch',payload),context);assert.equal(rejected.status,422);assert.match((await rejected.json()).error,/threshold/);revert=false;
   const prepared=await launch(request('launch',payload),context);
@@ -84,9 +86,16 @@ for(const buy of ['0','0.025'])test(`saved image, raw CID and ${buy} BNB develop
   const result=await prepared.json();assert.equal(result.predictedAddress,address);assert.equal(BigInt(result.transaction.value),parseEther(buy));assert.equal(result.initialBuyBnb,buy);
   assert.equal(sql.prepare('SELECT initial_buy_wei FROM prepared_launches').get().initial_buy_wei,parseEther(buy).toString());
   assert.equal(uploads,1);
-  expectedTweet=null;uploadResult='not-a-cid';const invalid=await metadata(request('metadata',{useSavedImage:true}),context);
+  const unauthorized=await metadata(request('metadata',{useSavedImage:true}),context);assert.equal(unauthorized.status,400);assert.equal(uploads,1);
+  const second=await (await launch(request('launch',{action:'authorize',creator:creator.address,initialBuyBnb:buy,tweetUrl:tweet}),context)).json();
+  uploadResult='not-a-cid';const invalid=await metadata(request('metadata',{useSavedImage:true,authorizationId:second.authorizationId}),context);
   assert.equal(invalid.status,502);assert.match((await invalid.json()).error,/invalid metadata identifier/);
   preparedTransaction=result.transaction;confirmValue='0x'+(parseEther(buy)+1n).toString(16);
+  // The submitted hash is recorded server-side, so any device can resume, and a
+  // second launch cannot be prepared while this one can still land.
+  const submitted=await launch(request('launch',{action:'submitted',planId:result.planId,hash:txHash}),context);assert.equal(submitted.status,200);
+  const status=await (await launchGET(new Request('https://shen.now/api/coins/'+id+'/launch'),context)).json();assert.equal(status.pending.planId,result.planId);assert.equal(status.pending.hash,txHash);assert.equal(status.launched,false);
+  const again=await launch(request('launch',{action:'authorize',creator:creator.address,initialBuyBnb:buy,tweetUrl:tweet}),context);assert.equal(again.status,409);assert.match((await again.json()).error,/already on-chain/);
   pending=true;const unmined=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(unmined.status,202);assert.equal((await unmined.json()).status,'pending');pending=false;
   head='0x101';const waiting=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(waiting.status,202);assert.equal((await waiting.json()).status,'pending');head='0x103';assert.equal(bindings,0);
   receiptStatus='0x0';const reverted=await launch(request('launch',{action:'confirm',planId:result.planId,hash:txHash}),context);assert.equal(reverted.status,409);receiptStatus='0x1';

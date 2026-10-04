@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import type { Coin } from "@/lib/model";
 import type { T } from "@/lib/ui";
+import { anySignal, timeoutSignal } from "@/lib/launch-confirmation";
 
 export default function TreasuryBalance({coin,t}:{coin:Coin;t:T}){
   const [snapshot,setSnapshot]=useState<{balance:number;observedAt:number}|null>(coin.treasuryObservedAt?{balance:coin.balance,observedAt:coin.treasuryObservedAt}:null);
@@ -12,7 +13,7 @@ export default function TreasuryBalance({coin,t}:{coin:Coin;t:T}){
     const controller=new AbortController();
     async function load(){
       try{
-        const result=await fetch(`/api/coins/${coin.id}/balance`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(20000)]),cache:"no-store"});
+        const result=await fetch(`/api/coins/${coin.id}/balance`,{signal:anySignal([controller.signal,timeoutSignal(20000)]),cache:"no-store"});
         const data=await result.json() as {address?:string;balance:number;observedAt:number};
         if(!result.ok||data.address?.toLowerCase()!==coin.treasuryAddress?.toLowerCase()||!Number.isFinite(data.balance)||data.balance<0||!Number.isFinite(data.observedAt))throw Error();
         if(active){setSnapshot({balance:data.balance,observedAt:data.observedAt});setError(false)}

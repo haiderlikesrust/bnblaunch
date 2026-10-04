@@ -20,11 +20,16 @@ export async function beginXConnection(coinId:string,owner:string){
  const encrypted=await sealServiceSecret(env.SERVICE_CREDENTIALS_KEY,'x-oauth:'+id+':'+owner,{verifier});
  const limit=Number(env.X_LOGIN_DAILY_LIMIT_MICROUSD??1000000),cost=10000;
  if(!Number.isSafeInteger(limit)||limit<cost)throw new AppError(503,'X connection allowance is unavailable.');
+ stage='storage';
+ // Allowances are checked before any paid X call, so spam cannot exhaust the
+ // platform's X credit or rate limit for everyone else.
+ const recent=await db().prepare("SELECT (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?) AS hour,(SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?) AS day,(SELECT COUNT(*) FROM x_oauth_attempts WHERE created_at>?) AS total").bind(owner,now-3600000,owner,now-86400000,now-86400000).first<{hour:number;day:number;total:number}>();
+ if(Number(recent?.hour)>=3||Number(recent?.day)>=10||Number(recent?.total)*cost+cost>limit)throw new AppError(429,'The X connection allowance has been reached. Try later.');
  stage='credit-check';
  if(await xProvider(env.X_API_BEARER_TOKEN!).balance()<cost)throw new AppError(503,'X API credit needs replenishing.');
  stage='storage';
  await db().prepare("UPDATE x_oauth_attempts SET encrypted_verifier='',status='expired' WHERE expires_at<? AND status IN ('pending','exchanging')").bind(now).run();
- const saved=await db().prepare("INSERT INTO x_oauth_attempts(id,coin_id,owner,encrypted_verifier,status,created_at,expires_at) SELECT ?,?,?,?,'pending',?,? WHERE (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?)<3 AND (SELECT COUNT(*) FROM x_oauth_attempts WHERE created_at>?)*?+?<=?").bind(id,coinId,owner,encrypted,now,now+600000,owner,now-3600000,now-86400000,cost,cost,limit).run();
+ const saved=await db().prepare("INSERT INTO x_oauth_attempts(id,coin_id,owner,encrypted_verifier,status,created_at,expires_at) SELECT ?,?,?,?,'pending',?,? WHERE (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?)<3 AND (SELECT COUNT(*) FROM x_oauth_attempts WHERE owner=? AND created_at>?)<10 AND (SELECT COUNT(*) FROM x_oauth_attempts WHERE created_at>?)*?+?<=?").bind(id,coinId,owner,encrypted,now,now+600000,owner,now-3600000,owner,now-86400000,now-86400000,cost,cost,limit).run();
  if(!saved.meta.changes)throw new AppError(429,'The X connection allowance has been reached. Try later.');
  const params=new URLSearchParams({response_type:'code',client_id:env.X_CLIENT_ID!,redirect_uri:redirectUri,scope:X_SCOPES.join(' '),state,code_challenge:challenge,code_challenge_method:'S256'});
  return {state,url:'https://x.com/i/oauth2/authorize?'+params};

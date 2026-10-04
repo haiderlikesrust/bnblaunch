@@ -14,21 +14,21 @@ function fixture(){
  const sql=new DatabaseSync(':memory:');sql.exec('PRAGMA foreign_keys=ON');for(const name of readdirSync('drizzle').filter(n=>n.endsWith('.sql')).sort())sql.exec(readFileSync('drizzle/'+name,'utf8'));
  function prepare(query,values=[]){const statement={query,values,bind(...next){return prepare(query,next)},async run(){const r=sql.prepare(query).run(...values);return {meta:{changes:Number(r.changes)},results:[]}},async all(){return {results:sql.prepare(query).all(...values)}},async first(column){const r=sql.prepare(query).get(...values);return column?r?.[column]??null:r??null}};return statement;}
  env.DB={prepare,async batch(statements){sql.exec('BEGIN');try{const output=[];for(const s of statements)output.push(await s.run());sql.exec('COMMIT');return output}catch(e){sql.exec('ROLLBACK');throw e}}};
- let generations=0,posts=0,uploads=0,postText='',postMedia=null,postAt=0,missingCost=false,losePost=false,readAuthor='123';
+ let generations=0,posts=0,uploads=0,reads=0,postText='',postMedia=null,postAt=0,missingCost=false,losePost=false,rejectPost=false,readAuthor='123';
  globalThis.fetch=async(url,init={})=>{
   const u=String(url);
   if(u.includes('/images/models/'))return json({endpoints:[{provider_tag:'seed',supported_parameters:{resolution:{values:['1K','2K']},aspect_ratio:{values:['1:1']}},pricing:[{billable:'output_image',unit:'image',cost_usd:.04}]}]});
   if(u.endsWith('/v1/images')){generations++;return json({data:[{b64_json:readFileSync('public/shen-symbol.png').toString('base64'),media_type:'image/png'}],...(missingCost?{}:{usage:{cost:.04}})});}
   if(u.endsWith('/2/usage/credits'))return json({data:{total_balance:100}});
   if(u.endsWith('/2/media/upload')){uploads++;return json({data:{id:'777'}});}
-  if(u.endsWith('/2/tweets')){posts++;const v=JSON.parse(init.body);postText=v.text;postMedia=v.media?.media_ids?.[0];postAt=Date.now();if(losePost)throw Error('Lost reply after acceptance');return json({data:{id:'888'}});}
-  if(u.includes('/2/users/123/tweets?'))return json({data:[{id:'888',author_id:readAuthor,text:postText,created_at:new Date(postAt).toISOString(),...(postMedia?{attachments:{media_keys:['3_'+postMedia]}}:{})}]});
+  if(u.endsWith('/2/tweets')){posts++;if(rejectPost)return new Response(JSON.stringify({title:'Forbidden'}),{status:403,headers:{'Content-Type':'application/json'}});const v=JSON.parse(init.body);postText=v.text;postMedia=v.media?.media_ids?.[0];postAt=Date.now();if(losePost)throw Error('Lost reply after acceptance');return json({data:{id:'888'}});}
+  if(u.includes('/2/users/123/tweets?')){reads++;return json({data:[{id:'888',author_id:readAuthor,text:postText,created_at:new Date(postAt).toISOString(),...(postMedia?{attachments:{media_keys:['3_'+postMedia]}}:{})}]});}
   throw Error('Unexpected external call '+u);
  };
  const coin=(id,credit=1000000)=>{const config={id,name:'Community',symbol:'SHEN',social:true,images:true,language:'en',tokenAddress:'0x1111111111111111111111111111111111111111'};sql.prepare('INSERT INTO coins(id,owner,config,token_address,created_at,updated_at,ai_credit_microusd) VALUES(?,?,?,?,?,?,?)').run(id,'owner',JSON.stringify(config),config.tokenAddress+id,new Date().toISOString(),new Date().toISOString(),credit);return config;};
  const job=(id,coinId,destination='x',image=true)=>sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at,x_provider) VALUES(?,?,?,'queued',?,?,'official')").run(id,coinId,JSON.stringify({destination,text:'A verified community update.',imagePrompt:image?'Original abstract community artwork.':null,altText:'Community illustration'}),Date.now(),Date.now());
  const account=async id=>sql.prepare("INSERT INTO x_accounts(coin_id,user_id,username,encrypted_session,version,updated_at,auth_type) VALUES(?,?,?,?,?,?,'oauth2')").run(id,'123','shen',await sealServiceSecret(env.SERVICE_CREDENTIALS_KEY,id+':123:v1',{accessToken:'test-access',refreshToken:'test-refresh',expiresAt:Date.now()+3600000,scopes:[]}),'v1',Date.now());
- return {sql,coin,job,account,get counts(){return {generations,posts,uploads}},missingCost(){missingCost=true},losePost(){losePost=true},wrongAuthor(){readAuthor='999'},close(){sql.close();globalThis.fetch=originalFetch}};
+ return {sql,coin,job,account,get counts(){return {generations,posts,uploads}},get reads(){return reads},missingCost(){missingCost=true},losePost(){losePost=true},rejectPost(){rejectPost=true},wrongAuthor(){readAuthor='999'},close(){sql.close();globalThis.fetch=originalFetch}};
 }
 test('content pipeline reserves once, generates once, persists media, posts once and settles exact known cost',async()=>{
  const f=fixture();try{f.coin('coin');await f.account('coin');f.job('job','coin');await Promise.all([runContentTick(),runContentTick()]);
@@ -42,8 +42,10 @@ test('lost X acknowledgement is reconciled by exact account and content without 
   assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'complete');assert.equal(f.counts.posts,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,935000);
  }finally{f.close()}
 });
-test('unknown image cost holds the reservation and never regenerates or publishes',async()=>{
- const f=fixture();try{f.coin('coin');f.job('job','coin','gallery');f.missingCost();for(let i=0;i<5;i++)await runContentTick();assert.deepEqual(f.counts,{generations:1,uploads:0,posts:0});assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'uncertain');assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');}finally{f.close()}
+test('unknown image cost never regenerates, then settles at its quote ceiling instead of holding credit',async()=>{
+ const f=fixture();try{f.coin('coin');f.job('job','coin','gallery');f.missingCost();for(let i=0;i<5;i++)await runContentTick();assert.deepEqual(f.counts,{generations:1,uploads:0,posts:0});assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'uncertain');assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');
+  f.sql.prepare('UPDATE content_jobs SET updated_at=?,next_attempt_at=0').run(Date.now()-61000);await runContentTick();
+  assert.equal(f.counts.generations,1);assert.equal(f.sql.prepare('SELECT status FROM content_jobs').get().status,'complete');assert.equal(JSON.parse(f.sql.prepare('SELECT payload FROM content_jobs').get().payload).imagePrompt,null);assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'settled');assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,950000);}finally{f.close()}
 });
 
 test('a confirmed image rejection publishes gallery text once and releases unused credit',async()=>{
@@ -94,4 +96,23 @@ test('local community text publishes without X, image services or additional pro
   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,1);
   assert.deepEqual(f.counts,{generations:0,uploads:0,posts:0});
  }finally{for(const key of keys){if(previous[key]===undefined)delete env[key];else env[key]=previous[key];}f.close();}
+});
+test('a definite X rejection fails without a post charge or a reconciliation read',async()=>{
+ const f=fixture();try{f.coin('coin');await f.account('coin');f.job('job','coin','x',false);f.rejectPost();for(let i=0;i<3;i++)await runContentTick();
+  const job=f.sql.prepare('SELECT status,cost_microusd FROM content_jobs').get();assert.equal(job.status,'failed');assert.equal(job.cost_microusd,0);assert.equal(f.counts.posts,1);assert.equal(f.reads,0);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE status='reserved'").get().n,0);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000);
+ }finally{f.close()}
+});
+test('three unmatched timeline reads isolate a possible post charge without resending',async()=>{
+ const f=fixture();try{f.coin('coin');await f.account('coin');f.job('job','coin','x',false);f.losePost();f.wrongAuthor();for(let i=0;i<3;i++)await runContentTick();
+  for(let i=0;i<4;i++){f.sql.prepare('UPDATE content_jobs SET updated_at=?,next_attempt_at=0').run(Date.now()-61000);await runContentTick();}
+  const job=f.sql.prepare('SELECT status FROM content_jobs').get();assert.equal(job.status,'failed');assert.equal(f.counts.posts,1);assert.equal(f.reads,3);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE status='reserved' AND kind='content'").get().n,0);assert.equal(f.sql.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE status='reserved' AND kind='provider_hold'").get().n,1);f.job('next','coin','gallery',false);await runContentTick();assert.notEqual(f.sql.prepare("SELECT status FROM content_jobs WHERE id='next'").get().status,'queued','the separate hold does not block new content');
+ }finally{f.close()}
+});
+test('a legacy stuck post without posting_at is matched on the timeline since creation',async()=>{
+ const f=fixture();try{f.coin('coin');await f.account('coin');f.job('job','coin','x',false);f.losePost();for(let i=0;i<3;i++)await runContentTick();
+  f.sql.prepare('UPDATE content_jobs SET posting_at=NULL,updated_at=?,next_attempt_at=0').run(Date.now()-61000);await runContentTick();
+  const job=f.sql.prepare('SELECT status,tweet_id FROM content_jobs').get();assert.equal(job.status,'complete');assert.equal(job.tweet_id,'888');assert.equal(f.counts.posts,1);
+ }finally{f.close()}
 });

@@ -22,7 +22,8 @@ export async function agentWallet(coinId:string){
 }
 // Creating a token only depends on its wallet. Provider funding, worker health
 // and optional features are checked when the agent actually uses them.
-export async function launchReadiness(_coin:Coin){
+export async function launchReadiness(coin:Coin){
+  if(coin.tokenAddress)return {ready:false,reason:"This token is already launched."};
   if(!env.SIGNER_URL||!env.SIGNER_WEB_TOKEN)return {ready:false,reason:"Agent wallet service needs to be connected."};
   const signer=await signerRequest<{chainId:number;signingReady:boolean}>("/v1/status");
   return signer.chainId===56&&signer.signingReady?{ready:true,reason:"Ready to launch"}:{ready:false,reason:"Agent wallet signing is unavailable. The platform wallet service must be ready to receive your token’s fees."};

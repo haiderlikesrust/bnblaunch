@@ -45,8 +45,11 @@ export class WalletStore {
   open(value, aad) {
     const box = JSON.parse(value);
     if (box.v !== 1) throw Error('Unsupported key version');
-    const cipher = createDecipheriv('aes-256-gcm', this.key, Buffer.from(box.iv, 'base64'));
-    cipher.setAAD(Buffer.from(aad)); cipher.setAuthTag(Buffer.from(box.tag, 'base64'));
+    // A full 16-byte tag and 12-byte IV are required; truncated tags weaken forgery resistance.
+    const iv = Buffer.from(box.iv, 'base64'), tag = Buffer.from(box.tag, 'base64');
+    if (iv.length !== 12 || tag.length !== 16) throw Error('Invalid sealed value');
+    const cipher = createDecipheriv('aes-256-gcm', this.key, iv, { authTagLength: 16 });
+    cipher.setAAD(Buffer.from(aad)); cipher.setAuthTag(tag);
     return Buffer.concat([cipher.update(Buffer.from(box.ciphertext, 'base64')), cipher.final()]).toString('utf8');
   }
   wallet(id) { return this.db.prepare('SELECT * FROM wallets WHERE coin_id=?').get(id); }

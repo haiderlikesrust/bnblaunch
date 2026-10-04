@@ -16,7 +16,8 @@ export async function POST(request:Request){try{
   if(v.action==="challenge")return response(await challenge(v.wallet,requestOrigin(request)));
   const jar=await cookies();
   if(v.action==="logout"){const token=jar.get(SESSION_COOKIE)?.value;if(token)await db().prepare("DELETE FROM wallet_sessions WHERE id=?").bind(await digest(token)).run();jar.delete(SESSION_COOKIE);return response({ok:true});}
-  let result;try{result=await verifyLogin(v.id,v.signature as Hex)}catch{throw new AppError(401,"Wallet signature is invalid, expired or already used.")}
+  // Invalid signatures are 401; storage failures surface as 503, not as a bad signature.
+  const result=await verifyLogin(v.id,v.signature as Hex);
   jar.set(SESSION_COOKIE,result.token,{httpOnly:true,secure:env.SHEN_RUNTIME==='node'||requestOrigin(request).startsWith('https:'),sameSite:'lax',path:'/',maxAge:86400});
   return response({user:{userId:result.wallet,displayName:result.wallet}});
 }catch(e){return failure(e)}}

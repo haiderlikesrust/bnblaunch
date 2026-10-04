@@ -34,5 +34,14 @@ declare namespace Cloudflare {
     DOKPLOY_COMPOSE_ID?: string;
     HOSTING_IPV4?: string;
     RELAY_API_KEY?: string;
+    HIGGSFIELD_API_KEY_ID?: string;
+    HIGGSFIELD_API_KEY_SECRET?: string;
+    HIGGSFIELD_IMAGE_COST_MICROUSD?: string;
+    HIGGSFIELD_VIDEO_COST_MICROUSD?: string;
+    HIGGSFIELD_CHARACTER_COST_MICROUSD?: string;
+    HIGGSFIELD_VIDEO_MODEL?: string;
+    INFLUENCER_DAILY_POSTS?: string;
+    INFLUENCER_VIDEO_PERCENT?: string;
+    INFLUENCER_CREDIT_FLOOR_MICROUSD?: string;
   }
 }

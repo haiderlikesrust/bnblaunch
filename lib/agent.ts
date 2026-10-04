@@ -20,5 +20,7 @@ export async function checkAndRecord(coin:Coin,row:CoinRow){
   // Owner checks observe launched agents; they cannot reset the worker's state.
   if(coin.tokenAddress)return {coin,output:check};
   const next:Coin={...coin,balance:0,state:coin.state==="paused"?"paused":"draft"};
-  await persist(next,row.owner,"就绪检查 · Readiness: "+check.reason,row.config);return {coin:next,output:check};
+  // Repeated checks of an unchanged plan write no event rows.
+  if(JSON.stringify(next)!==row.config)await persist(next,row.owner,"就绪检查 · Readiness: "+check.reason,row.config);
+  return {coin:next,output:check};
 }

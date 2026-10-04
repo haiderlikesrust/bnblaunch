@@ -83,7 +83,7 @@ test('funded planner has no daily money cap, receives market/fee/cost context an
  }finally{f.close()}
 });
 test('a rejected update or ambiguous provider failure preserves the last committed site',async()=>{
- const f=fixture();try{await runAgentTick(['autonomous-planning']);f.due();f.output({...plan,website:{...site,title:'Unverified replacement'}});f.reject();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal((await publishedWebsite('coin')).site.title,site.title);f.due();f.fail();await assert.rejects(runAgentTick(['autonomous-planning']));assert.equal((await publishedWebsite('coin')).site.revision,1)}finally{f.close()}
+ const f=fixture();try{await runAgentTick(['autonomous-planning']);f.due();f.output({...plan,website:{...site,title:'Unverified replacement'}});f.reject();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal((await publishedWebsite('coin')).site.title,site.title);f.due();f.fail();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');assert.equal((await publishedWebsite('coin')).site.revision,1)}finally{f.close()}
 });
 test('a funded first plan can defer publishing its website',async()=>{
  const f=fixture();try{f.output({...plan,website:null});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(await publishedWebsite('coin'),null);const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.canPublishWebsite,true);assert.equal(snapshot.hasPublishedWebsite,false);assert.equal(snapshot.websiteTiming.priority,'growing');}finally{f.close()}
@@ -107,11 +107,11 @@ for(const rejectGuard of [false,true])test(`a truncated ${rejectGuard?'guard':'p
   f.modifyReply(reply=>reply);f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal((await publishedWebsite('coin')).site.revision,1);
  }finally{f.close()}
 });
-for(const invalid of ['missing','negative','unsafe','over-ceiling'])test(`a ${invalid} cost receipt keeps the planner reservation even when output is rejected`,async()=>{
+for(const invalid of ['missing','negative','unsafe','over-ceiling'])test(`a ${invalid} cost receipt holds the unknown call separately and permits the next cycle`,async()=>{
  const f=fixture();try{
   f.modifyReply(reply=>{reply.choices[0].finish_reason='length';if(invalid==='missing')delete reply.usage;else reply.usage.cost=invalid==='negative'?-.001:invalid==='unsafe'?1e20:1;return reply});
-  await assert.rejects(runAgentTick(['autonomous-planning']),/awaiting reconciliation/);const run=f.sql.prepare('SELECT status,cost_microusd,reserved_microusd FROM agent_runs').get();assert.equal(run.status,'reserved');assert.equal(run.cost_microusd,null);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000-run.reserved_microusd);assert.equal(await publishedWebsite('coin'),null);
-  f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');assert.equal(f.calls.length,1);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');const run=f.sql.prepare('SELECT status,cost_microusd,reserved_microusd FROM agent_runs').get();assert.equal(run.status,'settled');assert.equal(run.cost_microusd,0);const hold=f.sql.prepare("SELECT reserved_microusd FROM agent_runs WHERE kind='provider_hold'").get();assert.ok(hold.reserved_microusd>0&&hold.reserved_microusd<=run.reserved_microusd);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000-run.cost_microusd-hold.reserved_microusd);assert.equal(await publishedWebsite('coin'),null);
+  f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable','the next cycle runs instead of staying blocked');assert.equal(f.calls.length,2);
  }finally{f.close()}
 });
 test('an expired planning lease cannot publish a website',async()=>{
@@ -145,7 +145,7 @@ test('model usage records actual token receipts and preserves unknown costs for 
   await runAgentTick(['autonomous-planning']);
   const usage=f.sql.prepare('SELECT * FROM model_usage ORDER BY created_at').all();assert.equal(usage.length,2);
   assert.equal(usage[0].prompt_tokens,101);assert.equal(usage[0].cached_tokens,12);assert.equal(usage[0].reasoning_tokens,8);assert.equal(usage[0].cost_microusd,100);assert.equal(usage[0].status,'recorded');
-  f.due();f.modifyReply(reply=>{delete reply.usage;return reply});await assert.rejects(runAgentTick(['autonomous-planning']),/awaiting reconciliation/);
+  f.due();f.modifyReply(reply=>{delete reply.usage;return reply});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');
   const unknown=f.sql.prepare("SELECT * FROM model_usage WHERE status='reconciliation_required'").get();assert.equal(unknown.cost_microusd,null);assert.equal(unknown.prompt_tokens,null);
  }finally{f.close()}
 });
@@ -231,11 +231,12 @@ test('missing research configuration leaves useful non-research planning availab
  }finally{if(previous!==undefined)env.BRAVE_COST_MICROUSD=previous;f.close();}
 });
 
-test('a failed planner records its failure stage and keeps ambiguous credit reserved',async()=>{
+test('a failed planner isolates its unknown charge and bounds its retry delay',async()=>{
  const f=fixture();try{
-  f.fail();await assert.rejects(runAgentTick(['autonomous-planning']));
+  f.fail();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');
   assert.equal(f.sql.prepare('SELECT last_reason FROM runtime_leases').get().last_reason,'planner_request_failed');
-  assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');
+  const run=f.sql.prepare('SELECT status,cost_microusd,reserved_microusd FROM agent_runs').get();assert.equal(run.status,'settled');assert.equal(run.cost_microusd,0);const hold=f.sql.prepare("SELECT reserved_microusd FROM agent_runs WHERE kind='provider_hold'").get();assert.ok(hold.reserved_microusd>0&&hold.reserved_microusd<=run.reserved_microusd);
+  const next=f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at;assert.ok(next>Date.now()+4*60000&&next<=Date.now()+5*60000);
  }finally{f.close();}
 });
 
@@ -267,17 +268,18 @@ for(const mode of ['unverified','empty','insufficient','fee_audit'])test('prepai
 });
 
 
-for(const mode of ['planner-length','guard-length','schema','guard-rejection'])test('settled rejection retries immediately with a bounded burst: '+mode,async()=>{
+for(const mode of ['planner-length','guard-length','schema','guard-rejection'])test('settled rejection retries on the next minute with a five-minute burst cooldown: '+mode,async()=>{
  const f=fixture();try{
   if(mode==='schema')f.output({...plan,nextCheckMinutes:0});
   else if(mode==='guard-rejection')f.reject();
   else f.modifyReply((reply,guard)=>{if(guard===(mode==='guard-length'))reply.choices[0].finish_reason='length';return reply});
   for(let attempt=1;attempt<=3;attempt++){
+   f.sql.prepare("UPDATE runtime_leases SET next_run_at=0").run();
    await runAgentTick(['autonomous-planning']);
    assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_runs').get().n,attempt);
    const s=f.sql.prepare('SELECT next_run_at,next_plan_at FROM runtime_leases').get();
-   if(attempt<3){assert.equal(s.next_plan_at,0);assert.ok(s.next_run_at<=Date.now());}
-   else{assert.ok(s.next_plan_at>Date.now()+14*60000);assert.ok(s.next_run_at>Date.now());}
+   if(attempt<3){assert.equal(s.next_plan_at,0);assert.ok(s.next_run_at<=Date.now()+60000);}
+   else{assert.ok(s.next_plan_at>Date.now()+4*60000&&s.next_plan_at<=Date.now()+5*60000);assert.ok(s.next_run_at>Date.now());}
   }
   const calls=f.calls.length;
   f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();
@@ -364,8 +366,8 @@ for(const invalid of ['orphan','amount-mismatch'])test('an '+invalid+' content r
 test('continuing plans cannot queue a duplicate publication while image confirmation is pending',async()=>{
  const f=fixture();try{holdImage(f);f.output({...plan,publication:{destination:'gallery',text:'Duplicate attempt',imagePrompt:null,altText:''}});assert.equal((await runAgentTick(['autonomous-planning'])).rejection.message.includes('A publication is already pending'),true);assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM content_jobs').get().n,1);}finally{f.close();}
 });
-test('adaptive pulse preserves a six-hour credit runway and validates public spending targets',()=>{
- assert.equal(pulseMinutes(6000000,10000),1);assert.equal(pulseMinutes(600000,10000),6);assert.equal(pulseMinutes(0,10000),360);
+test('adaptive pulse is bounded to one through five minutes and validates public spending targets',()=>{
+ assert.equal(pulseMinutes(6000000,10000),1);assert.equal(pulseMinutes(600000,10000),5);assert.equal(pulseMinutes(0,10000),5);
  assert.equal(treasuryThesis.safeParse({buyback:15,rewards:25,reserve:30,creative:30,reason:'Balance useful work with runway.'}).success,true);
  assert.equal(treasuryThesis.safeParse({buyback:15,rewards:25,reserve:30,creative:90,reason:'Oversubscribed.'}).success,false);
 });
@@ -412,10 +414,10 @@ test('research loop has a hard paid-step limit and never queues rejected work',a
   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
  }finally{delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;f.close();}
 });
-test('an uncertain follow-up model charge retains the whole cycle reservation',async()=>{
+test('an uncertain follow-up model charge settles the cycle instead of freezing it',async()=>{
  const f=fixture();let step=0;env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';try{
   f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));f.modifyReply((reply,guard)=>{if(!guard){if(step++===0)reply.choices[0].message.content=JSON.stringify({tool:'research',query:'Mars research'});else delete reply.usage;}return reply;});
-  await assert.rejects(runAgentTick(['autonomous-planning']),/reconciliation/);assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_unavailable');const run=f.sql.prepare('SELECT status,cost_microusd FROM agent_runs').get();assert.equal(run.status,'settled');assert.equal(run.cost_microusd,5100,'only known planner and research costs are spent');assert.ok(f.sql.prepare("SELECT reserved_microusd FROM agent_runs WHERE kind='provider_hold'").get().reserved_microusd>0);f.due();assert.notEqual((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');
  }finally{delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;f.close();}
 });
 test('a completed output wakes an approved slow pulse once and cannot bypass rejection backoff',async()=>{
@@ -485,4 +487,35 @@ test('task ownership and the three-active-task limit are enforced independently 
   await assert.rejects(validateTask('coin',finished),/not confirmed/);
   f.sql.prepare("UPDATE agent_operations SET status='confirmed'").run();await validateTask('coin',finished);
  }finally{f.close();}
+});
+
+
+test('a saved six-hour wait is shortened once and does not slide forward on each worker check',async()=>{
+ const f=fixture();try{
+  f.sql.prepare('INSERT INTO runtime_leases(coin_id,lease_until,next_run_at,next_plan_at) VALUES(?,0,0,?)').run('coin',Date.now()+6*3600000);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');
+  const next=f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at;
+  assert.ok(next>Date.now()+4*60000&&next<=Date.now()+5*60000);assert.equal(f.calls.length,0);
+  f.sql.exec('UPDATE runtime_leases SET next_run_at=0');await runAgentTick(['autonomous-planning']);
+  assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,next);
+  f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+ }finally{f.close();}
+});
+for(const status of ['reserved','generating','image_ready','uploading','media_ready','posting','reconciling'])test('active '+status+' media does not prevent independent planning',async()=>{
+ const f=fixture();try{holdImage(f);f.sql.prepare('UPDATE content_jobs SET status=?').run(status);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd c FROM coins').get().c,949800);
+  assert.equal(f.sql.prepare("SELECT reserved_microusd c FROM agent_runs WHERE id='content:held'").get().c,50000);
+ }finally{f.close();}
+});
+test('an orphan provider hold cannot bypass reservation ownership checks',async()=>{
+ const f=fixture();try{
+  f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at) VALUES('orphan:unverified','coin','provider_hold','reserved',100,?)").run(new Date().toISOString());
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');assert.equal(f.calls.length,0);
+ }finally{f.close();}
+});
+test('context trimming preserves full source URLs and identifiers',()=>{
+ const url='https://science.nasa.gov/'+ 'mars/'.repeat(250),id='reference-'+ '1'.repeat(150);
+ const result=boundedPlanningContext('Research.',{mission:'Mission '.repeat(8000),sources:[],browserResults:[{id,url,text:'Science '.repeat(1000)}],community:{recent:[]},website:null,spending:{market:{lastCandles:[]}}});
+ assert.equal(result.browserResults[0].url,url);assert.equal(result.browserResults[0].id,id);assert.ok(contextBytes('Research.',result)<=31000);
 });

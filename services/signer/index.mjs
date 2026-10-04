@@ -25,6 +25,8 @@ if(slippageBps>300) throw Error('Slippage must be <=300 bps');
 const storePath=resolve(env.SIGNER_DB_PATH??'/data/signer.sqlite');
 mkdirSync(dirname(storePath),{recursive:true,mode:0o700});
 const store=new WalletStore(storePath,required('SIGNER_MASTER_KEY'));
+// The key now lives only inside the store; drop it from this process environment.
+delete process.env.SIGNER_MASTER_KEY;
 const client=createPublicClient({chain:bsc,transport:http(rpc,{timeout:12000,retryCount:1})});
 const engine=new SigningEngine(store,client,{settlementAddress,slippageBps,gasReserveWei:positive('SIGNER_GAS_RESERVE_WEI'),maxGasPriceWei:positive('SIGNER_MAX_GAS_PRICE_WEI'),buybacksEnabled:env.SIGNER_BUYBACKS_ENABLED==='true'});
 const campaigns=new Campaigns(store,engine);

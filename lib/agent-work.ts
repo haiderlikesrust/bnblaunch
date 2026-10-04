@@ -31,5 +31,9 @@ export async function hasNewWorkResult(coinId:string,lastPlanId:unknown,observed
   if(typeof lastPlanId!=='string'||typeof observedAt!=='number')return false;
   const latest=await db().prepare("SELECT id,status,finished_at FROM agent_runs WHERE coin_id=? AND kind='plan' ORDER BY created_at DESC,id DESC LIMIT 1").bind(coinId).first<{id:string;status:string;finished_at:string|null}>();
   if(!latest||latest.id!==lastPlanId||latest.status!=='settled'||!latest.finished_at||Date.now()-Date.parse(latest.finished_at)<60000)return false;
-  return !!await db().prepare("SELECT id FROM content_jobs WHERE coin_id=? AND status IN ('complete','failed') AND updated_at>? UNION ALL SELECT id FROM agent_signals WHERE coin_id=? AND observed_at>? LIMIT 1").bind(coinId,observedAt,coinId,observedAt).first();
+  if(await db().prepare("SELECT id FROM content_jobs WHERE coin_id=? AND status IN ('complete','failed') AND updated_at>? LIMIT 1").bind(coinId,observedAt).first())return true;
+  // Market moves wake planning at most once per ten minutes: small alternating
+  // trades on a thin curve must not force a paid cycle every worker pass.
+  if(Date.now()-Date.parse(latest.finished_at)<600000)return false;
+  return !!await db().prepare("SELECT id FROM agent_signals WHERE coin_id=? AND observed_at>? LIMIT 1").bind(coinId,observedAt).first();
 }
