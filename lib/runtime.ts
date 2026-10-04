@@ -79,7 +79,7 @@ export async function refreshRuntimeHealth(){
 export async function runAgentTick(capabilities?:string[]){
   capabilities??=await refreshRuntimeHealth();
   if(!capabilities.includes("autonomous-planning"))return {processed:false,reason:"runtime_configuration_required"};
-  const lease=await acquire();if(!lease)return {processed:false,reason:"no_due_agents"};let nextMinutes=5;
+  const lease=await acquire();if(!lease)return {processed:false,reason:"no_due_agents"};let nextMinutes=.5,nextPlanAt:number|null=null;
   try{
     const row=await db().prepare("SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL").bind(lease.coinId).first<CoinRow>();if(!row)return {processed:false,reason:"coin_unavailable"};
     const coin=JSON.parse(row.config) as Coin;
@@ -90,9 +90,12 @@ export async function runAgentTick(capabilities?:string[]){
     await db().prepare("UPDATE coins SET config=?,updated_at=? WHERE id=? AND config=?").bind(JSON.stringify(nextCoin),new Date().toISOString(),coin.id,row.config).run();
     const feeFlow=await treasuryFlow(coin.id,row.token_address as Address,wallet.address as Address,BigInt(wallet.block),wallet.balanceWei);
     if(!active)return {processed:true,reason:"awaiting_treasury_funding"};
+    nextMinutes=1;
     if(await db().prepare("SELECT id FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast')").bind(coin.id).first())return {processed:true,reason:"transaction_pending"};
     if(await db().prepare("SELECT id FROM agent_runs WHERE coin_id=? AND status='reserved'").bind(coin.id).first())return {processed:true,reason:"provider_cost_reconciliation_required"};
     if(await db().prepare("SELECT id FROM domain_orders WHERE coin_id=? AND status IN ('queued','funding','reserve','purchase','review')").bind(coin.id).first())return {processed:true,reason:'domain_payment_pending'};
+    const schedule=await db().prepare("SELECT next_plan_at FROM runtime_leases WHERE coin_id=?").bind(coin.id).first<{next_plan_at:number}>();
+    if(schedule&&schedule.next_plan_at>Date.now())return {processed:true,reason:"awaiting_next_plan"};
     const prices=await Promise.all([chatPrice(agentModel(coin.modelId).id),chatPrice(GUARDRAIL_MODEL)]);
     const researchCost=coin.research?Number(env.BRAVE_COST_MICROUSD):0;
     if(coin.research&&(!Number.isSafeInteger(researchCost)||researchCost<=0||!env.BRAVE_API_KEY))throw new AppError(412,"Brave billing must be configured before research.");
@@ -124,6 +127,9 @@ export async function runAgentTick(capabilities?:string[]){
     const websiteQuote=coin.website&&!hosted?await bnbPrice().catch(()=>null):null;
     const siteTiming=websiteTiming(feeFlow.lifetimeDistributedWei,websiteQuote?.answer);
     const run=await reserve(lease,ceiling);
+    // Frequent wallet checks must not turn into a paid model call every minute.
+    // A failed/rejected attempt keeps a cooldown; approved plans choose their pace.
+    nextPlanAt=Date.now()+15*60000;
     // Any ambiguous provider failure keeps its reservation. Non-billable chain
     // preflight is complete before reserving, so known local failures don't lock credit.
     const sources=(coin.research?await recordResearch(coin,run.id,()=>research(coin)):[]).slice(0,3).map(s=>({title:s.title.slice(0,120),url:s.url.slice(0,512),description:s.description.slice(0,400)}));
@@ -165,6 +171,6 @@ export async function runAgentTick(capabilities?:string[]){
     ]);
     if(!saved[0].meta.changes)throw new AppError(409,"Agent planning lease expired.");
     if(plan.transaction.kind!=="none")await queue(lease,plan.transaction.kind,plan.transaction.amountWei,plan.transaction.reason);
-    nextMinutes=plan.nextCheckMinutes;return {processed:true,reason:"plan_completed"};
-  } finally {await db().prepare("UPDATE runtime_leases SET lease_id=NULL,lease_until=0,next_run_at=? WHERE coin_id=? AND lease_id=?").bind(Date.now()+nextMinutes*60000,lease.coinId,lease.id).run();}
+    nextPlanAt=Date.now()+plan.nextCheckMinutes*60000;return {processed:true,reason:"plan_completed"};
+  } finally {await db().prepare("UPDATE runtime_leases SET lease_id=NULL,lease_until=0,next_run_at=?,next_plan_at=COALESCE(?,next_plan_at) WHERE coin_id=? AND lease_id=?").bind(Date.now()+nextMinutes*60000,nextPlanAt,lease.coinId,lease.id).run();}
 }

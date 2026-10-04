@@ -36,7 +36,7 @@ function fixture(){
   if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json(modifyReply({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}},guard))}
   throw Error('Unexpected external call '+u);
  };
- return {sql,calls,coin,expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
+ return {sql,calls,coin,expire(){expiry=true},reject(){reject=true},fail(){fail=true},output(value){output=value},modifyReply(value){modifyReply=value},due(){sql.prepare('UPDATE runtime_leases SET next_run_at=0,next_plan_at=0').run()},close(){sql.close();globalThis.fetch=originalFetch}};
 }
 test('funded planner has no daily money cap, receives market/fee/cost context and publishes a real site',async()=>{
  const f=fixture();try{
@@ -141,4 +141,28 @@ test('guarded domain proposals require capability, a site and a separate afforda
   f.due();assert.equal((await runAgentTick(['autonomous-planning','custom-domains'])).reason,'plan_completed');assert.equal(f.sql.prepare('SELECT domain,status FROM domain_orders').get().domain,domain.domain);assert.equal(f.sql.prepare('SELECT status FROM domain_orders').get().status,'queued');
   assert.equal(agentPlan.safeParse({...plan,domain:{...domain,recipient:'0xbad'}}).success,false);
  }finally{for(const key of keys){if(previous[key]===undefined)delete env[key];else env[key]=previous[key];}f.close()}
+});
+
+
+test('wallet checks run within one minute without repeating a paid plan',async()=>{
+ const f=fixture();try{
+  await runAgentTick(['autonomous-planning']);
+  const schedule=f.sql.prepare('SELECT next_run_at,next_plan_at FROM runtime_leases').get();
+  assert.ok(schedule.next_run_at-Date.now()<=60000&&schedule.next_run_at>Date.now());
+  assert.ok(schedule.next_plan_at-Date.now()>3500000);
+  const calls=f.calls.length;
+  f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');
+  assert.equal(f.calls.length,calls);
+ }finally{f.close()}
+});
+
+test('unfunded agents recheck in thirty seconds without paid model calls',async()=>{
+ const f=fixture();try{
+  const coin={...f.coin,threshold:2};f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify(coin));
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_treasury_funding');
+  const schedule=f.sql.prepare('SELECT next_run_at FROM runtime_leases').get();
+  assert.ok(schedule.next_run_at-Date.now()<=30000&&schedule.next_run_at>Date.now());
+  assert.equal(f.calls.length,0);
+ }finally{f.close()}
 });
