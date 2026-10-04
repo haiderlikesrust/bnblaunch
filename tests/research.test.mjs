@@ -111,3 +111,17 @@ test('research follows approved next topics or mission context rather than a tok
  assert.equal(researchQuery({name:'MARTIAN',symbol:'MARTIAN',focus:'Atmosphere',purpose:'Mars',nextResearchQuery:'Latest rover findings'}),'Latest rover findings');
  assert.equal(researchQuery({name:'A',symbol:'A',nextResearchQuery:'x'.repeat(500)}).length,240);
 });
+
+test('browser captures are coin-scoped and private until launch; API returns frame links only',async()=>{
+ const sql=fixture();const {GET:frameGET}=await import('../app/api/coins/[id]/research/browser/[frameId]/route.ts');
+ try{
+  sql.prepare("INSERT INTO browser_sessions(id,coin_id,url,title,status,excerpt,started_at,finished_at) VALUES('visit','coin','https://example.com/','Page','complete','Full page text stays out of the feed',?,?)").run(Date.now(),Date.now());
+  sql.prepare("INSERT INTO browser_frames VALUES('frame','visit','coin',0,0,'/9j/2Q==')").run();
+  const request=new Request('https://shen.now/api/coins/coin/research');const get=()=>frameGET(request,{params:Promise.resolve({id:'coin',frameId:'frame'})});
+  const body=await (await GET(request,{params:Promise.resolve({id:'coin'})})).json();assert.equal(body.browserSessions[0].frames[0].imageUrl,'/api/coins/coin/research/browser/frame');assert.equal(JSON.stringify(body).includes('Full page text'),false);assert.equal(JSON.stringify(body).includes('/9j/2Q=='),false);
+  assert.equal((await get()).headers.get('content-type'),'image/jpeg');
+  assert.equal((await frameGET(request,{params:Promise.resolve({id:'another',frameId:'frame'})})).status,404);
+  sql.exec('UPDATE coins SET token_address=NULL');globalThis.__researchViewer=null;assert.equal((await get()).status,404);
+  globalThis.__researchViewer={userId:'owner'};assert.equal((await get()).status,200);
+ }finally{sql.close();globalThis.__researchViewer=null;}
+});

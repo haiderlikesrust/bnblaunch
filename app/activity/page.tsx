@@ -1,2 +1,2 @@
-import ShenApp from "@/components/shen-app";
-export default function Activity(){return <ShenApp page="activity"/>}
+import { redirect } from "next/navigation";
+export default function Activity(){redirect("/")}

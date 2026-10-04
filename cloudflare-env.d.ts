@@ -14,6 +14,8 @@ declare namespace Cloudflare {
     SIGNER_SETTLEMENT_ADDRESS?: string;
     OPENROUTER_MANAGEMENT_KEY?: string;
     BRAVE_COST_MICROUSD?: string;
+    BROWSER_URL?: string;
+    BROWSER_TOKEN?: string;
     X_CLIENT_ID?: string;
     X_CLIENT_SECRET?: string;
     X_API_BEARER_TOKEN?: string;

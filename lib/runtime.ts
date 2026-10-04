@@ -1,6 +1,11 @@
 import { agentMemory, memoryStatement } from "./agent-memory";
 import { xCosts } from "./social-config";
-import { recordResearch } from "./research-history";
+import { recordResearch, researchHistory } from "./research-history";
+import { browserReady, browseResearch } from './browser-research';
+import { recordMarketSignals, signalHistory } from './agent-signals';
+import { researchSources } from "./research-preview";
+import { researchStep, browseStep, pulseMinutes } from "./agent-work-policy";
+import { agentTasks, validateTask, taskStatement, hasNewWorkResult } from "./agent-work";
 import { serviceFundingAmount } from '../shared/service-funding.mjs';
 import { env } from "cloudflare:workers";
 import { z } from "zod";
@@ -43,7 +48,7 @@ async function acquire():Promise<Lease|null>{
   const now=Date.now();
   await db().prepare("INSERT INTO runtime_leases(coin_id,lease_until,next_run_at) SELECT id,0,0 FROM coins WHERE token_address IS NOT NULL ON CONFLICT(coin_id) DO NOTHING").run();
   const candidate=await db().prepare("SELECT coin_id FROM runtime_leases WHERE lease_until<? AND next_run_at<=? ORDER BY next_run_at,coin_id LIMIT 1").bind(now,now).first<{coin_id:string}>();if(!candidate)return null;
-  const id=crypto.randomUUID();const r=await db().prepare("UPDATE runtime_leases SET lease_id=?,lease_until=? WHERE coin_id=? AND lease_until<? AND next_run_at<=?").bind(id,now+240000,candidate.coin_id,now,now).run();return r.meta.changes?{coinId:candidate.coin_id,id}:null;
+  const id=crypto.randomUUID();const r=await db().prepare("UPDATE runtime_leases SET lease_id=?,lease_until=? WHERE coin_id=? AND lease_until<? AND next_run_at<=?").bind(id,now+480000,candidate.coin_id,now,now).run();return r.meta.changes?{coinId:candidate.coin_id,id}:null;
 }
 async function reserve(lease:Lease,ceiling:number){
   const id=crypto.randomUUID(),now=new Date().toISOString();
@@ -93,7 +98,7 @@ export async function runAgentTick(capabilities?:string[]){
   };
   try{
     const row=await db().prepare("SELECT * FROM coins WHERE id=? AND token_address IS NOT NULL").bind(lease.coinId).first<CoinRow>();if(!row)return {processed:false,reason:"coin_unavailable"};
-    const coin=JSON.parse(row.config) as Coin;
+    const coin=JSON.parse(row.config) as Coin & {lastPlanRunId?:string;workObservedAt?:number;nextResearchQuery?:string|null;treasuryThesis?:unknown};
     const wallet=await signerRequest<{address:string;tokenAddress:string;balanceWei:string;protocolReserveWei?:string|null;feeAccountingReady?:boolean;feeAccountingIssue?:string;observedAt:number;block:string}>(`/v1/wallets/${coin.id}/balance`);
     if(wallet.address.toLowerCase()!==row.treasury_address||wallet.tokenAddress?.toLowerCase()!==row.token_address)throw new AppError(503,"Agent wallet binding mismatch.");
     const wei=BigInt(wallet.balanceWei),balance=Number(formatEther(wei)),treasuryFunded=wei>=parseEther(String(coin.threshold));
@@ -110,16 +115,22 @@ export async function runAgentTick(capabilities?:string[]){
     if(await db().prepare("SELECT id FROM agent_operations WHERE coin_id=? AND status IN ('queued','signed','broadcast')").bind(coin.id).first())return tickResult("transaction_pending");
     if(await db().prepare("SELECT id FROM agent_runs WHERE coin_id=? AND status='reserved'").bind(coin.id).first())return tickResult("provider_cost_reconciliation_required");
     if(await db().prepare("SELECT id FROM domain_orders WHERE coin_id=? AND status IN ('queued','funding','reserve','purchase','review')").bind(coin.id).first())return tickResult("domain_payment_pending");
+    const currentMarket=await marketContext(row.token_address!);
+    await recordMarketSignals(lease,currentMarket);
     const schedule=await db().prepare("SELECT next_plan_at FROM runtime_leases WHERE coin_id=?").bind(coin.id).first<{next_plan_at:number}>();
-    if(schedule&&schedule.next_plan_at>Date.now())return tickResult("awaiting_next_plan");
+    if(schedule&&schedule.next_plan_at>Date.now()&&!await hasNewWorkResult(coin.id,coin.lastPlanRunId,coin.workObservedAt))return tickResult("awaiting_next_plan");
     lastReason="model_pricing_unavailable";
     const prices=await Promise.all([chatPrice(agentModel(coin.modelId).id),chatPrice(GUARDRAIL_MODEL)]);
-    const researchCost=coin.research?Number(env.BRAVE_COST_MICROUSD):0;
-    if(coin.research&&(!Number.isSafeInteger(researchCost)||researchCost<=0||!env.BRAVE_API_KEY))return tickResult("research_configuration_required");
-    const ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+researchCost;
+    const researchRate=Number(env.BRAVE_COST_MICROUSD);
+    const canResearch=coin.research&&!!env.BRAVE_API_KEY&&Number.isSafeInteger(researchRate)&&researchRate>0;
+    const canBrowse=coin.research&&await browserReady();
+    let maxSearches=canResearch||canBrowse?2:0;
+    let ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)*(maxSearches+1)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+maxSearches*(canResearch?researchRate:0);
     lastReason="social_billing_invalid";
     const xRates=coin.social?xCosts("https://shen.now"):null;
     const contentAllowance=(coin.images?125000:0)+(xRates?xRates.post+xRates.upload+xRates.read*3:0);
+    // Prefer a smaller useful cycle when credit cannot reserve every tool step.
+    while(maxSearches>0&&row.ai_credit_microusd<ceiling+contentAllowance){maxSearches--;ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)*(maxSearches+1)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+maxSearches*(canResearch?researchRate:0);}
     lastReason="signer_policy_unavailable";
     const signerPolicy=await signerRequest<{gasReserveWei:string;buybacksEnabled:boolean}>("/v1/status");
     const protocolReserve=BigInt(wallet.protocolReserveWei);
@@ -144,60 +155,91 @@ export async function runAgentTick(capabilities?:string[]){
     }
     lastReason="planning_context_unavailable";
     const tokenBalance=await chainClient().readContract({address:coin.tokenAddress as Address,abi:parseAbi(["function balanceOf(address) view returns(uint256)"]),functionName:"balanceOf",args:[wallet.address as Address]});
-    const [community,market,hosted,costs,domains,operations]=await Promise.all([contentSnapshot(coin),marketContext(row.token_address!),publishedWebsite(coin.id),db().prepare(`SELECT
+    const [community,market,hosted,costs,domains,operations]=await Promise.all([contentSnapshot(coin),Promise.resolve(currentMarket),publishedWebsite(coin.id),db().prepare(`SELECT
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
       (SELECT COALESCE(SUM(cost_microusd),0) FROM chat_runs WHERE coin_id=? AND status='settled' AND created_at>?) AS hour,
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
       (SELECT COALESCE(SUM(cost_microusd),0) FROM chat_runs WHERE coin_id=? AND status='settled' AND created_at>?) AS day`)
-      .bind(coin.id,new Date(Date.now()-3600000).toISOString(),coin.id,Date.now()-3600000,coin.id,new Date(Date.now()-86400000).toISOString(),coin.id,Date.now()-86400000).first<{hour:number;day:number}>(),domainSnapshot(coin.id,coin.website&&capabilities.includes("custom-domains")),db().prepare("SELECT kind,amount_wei AS amountWei,status,reason,created_at AS createdAt,tx_hash AS hash FROM agent_operations WHERE coin_id=? ORDER BY created_at DESC LIMIT 8").bind(coin.id).all()]);
+      .bind(coin.id,new Date(Date.now()-3600000).toISOString(),coin.id,Date.now()-3600000,coin.id,new Date(Date.now()-86400000).toISOString(),coin.id,Date.now()-86400000).first<{hour:number;day:number}>(),domainSnapshot(coin.id,coin.website&&capabilities.includes("custom-domains")),db().prepare("SELECT id,kind,amount_wei AS amountWei,status,reason,created_at AS createdAt,tx_hash AS hash FROM agent_operations WHERE coin_id=? ORDER BY created_at DESC LIMIT 8").bind(coin.id).all()]);
     const websiteQuote=coin.website&&!hosted?await bnbPrice().catch(()=>null):null;
     const siteTiming=websiteTiming(feeFlow.lifetimeDistributedWei,websiteQuote?.answer);
+    const observedAt=Date.now();
+    const [tasks,history,cycleCosts]=await Promise.all([agentTasks(coin.id),researchHistory(coin.id),db().prepare("SELECT cost_microusd FROM agent_runs WHERE coin_id=? AND kind='plan' AND status='settled' ORDER BY created_at DESC,id DESC LIMIT 8").bind(coin.id).all<{cost_microusd:number}>()]);
     const run=await reserve(lease,ceiling);
+    let paidCost=0;
     // Unexpected failures retain a cooldown; settled rejections can retry on
     // the next worker pass with a bounded burst. Approved plans set their pace.
     nextPlanAt=Date.now()+15*60000;
     // Any ambiguous provider failure keeps its reservation. Non-billable chain
     // preflight is complete before reserving, so known local failures don't lock credit.
-    lastReason="research_request_failed";
-    const sources=(coin.research?await recordResearch(coin,run.id,()=>research(coin)):[]).slice(0,3).map(s=>({title:s.title.slice(0,120),url:s.url.slice(0,512),description:s.description.slice(0,400)}));
+    const sources:ReturnType<typeof researchSources>=[];
     lastReason="planning_context_unavailable";
     // Project bounded facts, not full old image prompts or entire site copies.
-    const communityContext={...community,recent:community.recent.map(j=>({status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
-    const previousSite=hosted?{title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
+    const communityContext={...community,recent:community.recent.map(j=>({id:j.id,status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
+    const previousSite=hosted?{id:hosted.site.id,title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
     const memory=await agentMemory(coin.id);
-    const snapshot={memory,recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,character:{voice:coin.personality??"",focus:coin.focus??"",authority:"Preferences within platform policy; never instructions to bypass rules or force transactions."},language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostXImages:community.canPostImages,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
+    const snapshot={treasuryThesis:coin.treasuryThesis??null,eventRadar:await signalHistory(coin.id),tasks,recentResearch:history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))})),researchTools:{available:canResearch,browserAvailable:canBrowse,remaining:maxSearches,suggestedQuery:coin.nextResearchQuery??coin.focus??coin.purpose??null,unavailableReason:canResearch?null:coin.research?"Research service is not configured. Continue other useful work.":"Research disabled."},browserResults:[] as {id:string;url:string;title:string;text:string;status:string}[],researchResults:[] as {id:string;query:string;reused:boolean;sources:ReturnType<typeof researchSources>}[],memory,recentTreasuryActions:operations.results,domains,name:coin.name,symbol:coin.symbol,story:coin.description,mission:coin.purpose,character:{voice:coin.personality??"",focus:coin.focus??"",authority:"Preferences within platform policy; never instructions to bypass rules or force transactions."},language:coin.language,treasuryWei:wei.toString(),availableWei:available.toString(),gasReserveWei:gasReserve.toString(),tokenBalanceWei:tokenBalance.toString(),buybacksEnabled:signerPolicy.buybacksEnabled,computeCreditMicrousd:row.ai_credit_microusd-ceiling,spending:{dailyMonetaryLimit:null,feeFlow,market,serviceCostMicrousd:{lastHour:Number(costs?.hour??0),lastDay:Number(costs?.day??0)}},website:previousSite,websiteTiming:siteTiming,canPublishWebsite:coin.website,hasPublishedWebsite:!!hosted,sources,community:communityContext,canPostXImages:community.canPostImages,canPostX:coin.social&&community.xConnected&&capabilities.includes('x-publishing'),canGenerateImages:coin.images&&capabilities.includes('image-publishing')};
     const system=PLANNER_RULES+" Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
-    let bounded;
-    try{bounded=boundedPlanningContext(system,snapshot)}catch(error){await settle(coin.id,run,researchCost,'Essential planning context exceeded the local input bound.');throw error;}
-    lastReason="planner_request_failed";
-    let result;
-    try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS,32000,{coinId:coin.id,runId:run.id,kind:"planner"});}catch(error){
-      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return await rejectedResult(error.truncated?"planner_output_truncated":"plan_rejected");}
-      if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,researchCost,'Planner request rejected before dispatch.');throw error;
+    let bounded:ReturnType<typeof boundedPlanningContext<typeof snapshot>>;
+    let result:Awaited<ReturnType<typeof chatCompletion>>;
+    let decodedPlan:unknown;
+    for(let step=0;;step++){
+      snapshot.researchTools.remaining=maxSearches-step;
+      try{bounded=boundedPlanningContext(system,snapshot)}catch(error){await settle(coin.id,run,paidCost,'Essential planning context exceeded the local input bound.');throw error;}
+      lastReason="planner_request_failed";
+      try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS,32000,{coinId:coin.id,runId:run.id,kind:"planner"});}catch(error){
+        if(error instanceof PaidCompletionRejected){await settle(coin.id,run,paidCost+error.cost,'Planner output rejected with a verified cost receipt.');return await rejectedResult(error.truncated?"planner_output_truncated":"plan_rejected");}
+        if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,paidCost,'Planner request rejected before dispatch.');throw error;
+      }
+      paidCost+=result.cost;
+      try{decodedPlan=JSON.parse(result.text)}catch{await settle(coin.id,run,paidCost,'Planner returned invalid JSON.');return await rejectedResult('plan_rejected');}
+      const tool=researchStep.safeParse(decodedPlan),browse=browseStep.safeParse(decodedPlan);
+      if(!tool.success&&!browse.success)break;
+      if(step>=maxSearches){await settle(coin.id,run,paidCost,'Research step exceeded the available tool budget.');return await rejectedResult('plan_rejected');}
+      if(browse.success){
+        if(!canBrowse||!history.some(r=>r.status==='complete'&&r.sources.some(source=>source.url===browse.data.url))){await settle(coin.id,run,paidCost,'Browser target is not an available research source.');return await rejectedResult('plan_rejected');}
+        snapshot.browserResults.push(await browseResearch(coin.id,run.id+':browser:'+step,browse.data.url));
+        continue;
+      }
+      if(!canResearch||!tool.success){await settle(coin.id,run,paidCost,'Research capability unavailable.');return await rejectedResult('plan_rejected');}
+      const query=tool.data.query,normalize=(v:string)=>v.normalize('NFKC').replace(/\s+/g,' ').trim().toLowerCase();
+      const prior=history.find(r=>r.status==='complete'&&r.finishedAt&&r.finishedAt>Date.now()-3600000&&normalize(r.query)===normalize(query));
+      const id=prior?.id??run.id+':research:'+step;
+      lastReason="research_request_failed";
+      const fullSources=prior?.sources??await recordResearch({...coin,nextResearchQuery:query},id,()=>research({...coin,nextResearchQuery:query}));
+      if(!prior){paidCost+=researchRate;history.unshift({id,query,status:'complete',sources:fullSources,startedAt:Date.now(),finishedAt:Date.now()});}
+      const found=fullSources.slice(0,3).map(s=>({title:s.title.slice(0,120),url:s.url.slice(0,512),description:s.description.slice(0,400)}));
+      snapshot.sources=found;
+      snapshot.researchResults.push({id,query,reused:!!prior,sources:found});
+      snapshot.recentResearch=history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))}));
     }
     let plan;
-    try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return await rejectedResult("plan_rejected");}
-    // Funded community work should not be parked for hours after a valid plan.
-    plan={...plan,nextCheckMinutes:Math.min(plan.nextCheckMinutes,5)};
+    try{plan=validatePlanFunds(agentPlan.parse(decodedPlan),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.task)await validateTask(coin.id,plan.task);if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,paidCost,"Plan rejected by schema or spending policy.");return await rejectedResult("plan_rejected");}
+    // Pace from verified whole-cycle costs; a first cycle estimates review cost
+    // from the planner receipt until an actual completed cycle is available.
+    const averageCost=cycleCosts.results.length?cycleCosts.results.reduce((n,r)=>n+Number(r.cost_microusd),0)/cycleCosts.results.length:paidCost*2;
+    const cadence=pulseMinutes(row.ai_credit_microusd-paidCost,Math.max(averageCost,paidCost));
+    plan={...plan,nextCheckMinutes:cadence};
     lastReason="guard_request_failed";
     let guard;
     try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},GUARD_OUTPUT_TOKENS,64000,{coinId:coin.id,runId:run.id,kind:"plan-guard"});}catch(error){
-      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return await rejectedResult(error.truncated?"guard_output_truncated":"plan_rejected");}
-      if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,result.cost+researchCost,'Guard request rejected before dispatch.');throw error;
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,paidCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return await rejectedResult(error.truncated?"guard_output_truncated":"plan_rejected");}
+      if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,paidCost,'Guard request rejected before dispatch.');throw error;
     }
     lastReason="plan_save_failed";
     let decoded:unknown;try{decoded=JSON.parse(guard.text)}catch{decoded=null}
     const verdict=z.object({allow:z.boolean(),reason:z.string().max(1000)}).strict().safeParse(decoded);
-    await settle(coin.id,run,result.cost+guard.cost+researchCost,JSON.stringify(plan));
+    await settle(coin.id,run,paidCost+guard.cost,JSON.stringify(plan));
     if(!verdict.success||!verdict.data.allow)return await rejectedResult("plan_rejected");
     const current=await db().prepare("SELECT config FROM coins WHERE id=?").bind(coin.id).first<{config:string}>();if(!current)throw new AppError(409,"Coin changed during planning.");
-    const updated={...JSON.parse(current.config),lastPlanRunId:run.id,nextResearchQuery:coin.research?plan.nextResearchQuery:null};
+    const updated={...JSON.parse(current.config),lastPlanRunId:run.id,nextResearchQuery:coin.research?plan.nextResearchQuery:null,workObservedAt:observedAt,...(plan.treasuryThesis?{treasuryThesis:{...plan.treasuryThesis,updatedAt:Date.now()}}:{})};
     const now=Date.now();
     const saved=await db().batch([
       db().prepare("UPDATE coins SET config=?,updated_at=? WHERE id=? AND config=? AND EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(JSON.stringify(updated),new Date().toISOString(),coin.id,current.config,coin.id,lease.id,now),
       db().prepare("INSERT INTO agent_chat_control(coin_id,closed_until) SELECT ?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?) ON CONFLICT(coin_id) DO UPDATE SET closed_until=excluded.closed_until").bind(coin.id,now+plan.closeChatMinutes*60000,coin.id,lease.id,now),
       db().prepare("INSERT INTO events(id,coin_id,owner,name,message,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM runtime_leases WHERE coin_id=? AND lease_id=? AND lease_until>?)").bind(run.id,coin.id,row.owner,coin.name,plan.summary,new Date().toISOString(),coin.id,lease.id,now),
       memoryStatement(lease,run.id,plan.summary,plan.memory??"",now),
+      ...(plan.task?[taskStatement(lease,run.id,plan.task,now)]:[]),
       ...(plan.publication?[contentJobStatement(lease,run.id,plan.publication)]:[]),
       ...(coin.website&&plan.website?websiteStatements(lease,run.id,plan.website,now):[]),
       ...(coin.website&&plan.domain?[domainOrderStatement(lease,run.id,plan.domain,now)]:[]),

@@ -1,8 +1,10 @@
 import { db } from './server';
 import type { Coin } from './model';
+import { signalHistory } from './agent-signals';
+import { agentTasks } from './agent-work';
 export async function agentConsole(coin: Coin) {
   const now = Date.now();
-  const [research, run, content, operation, domain, lease, health, events, memory] = await Promise.all([
+  const [research, run, content, operation, domain, lease, health, events, memory, tasks, signals, moves, config] = await Promise.all([
     db().prepare('SELECT status,started_at,finished_at FROM research_runs WHERE coin_id=? ORDER BY started_at DESC LIMIT 1').bind(coin.id).first<{ status: string; started_at: number; finished_at: number | null }>(),
     db().prepare("SELECT status,created_at,finished_at,EXISTS(SELECT 1 FROM agent_memories WHERE agent_memories.id=agent_runs.id AND agent_memories.coin_id=agent_runs.coin_id) AS approved FROM agent_runs WHERE coin_id=? AND kind='plan' ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; created_at: string;finished_at:string|null;approved:boolean|number }>(),
     db().prepare("SELECT status,updated_at FROM content_jobs WHERE coin_id=? AND status NOT IN ('complete','failed') ORDER BY created_at DESC LIMIT 1").bind(coin.id).first<{ status: string; updated_at: number }>(),
@@ -12,9 +14,12 @@ export async function agentConsole(coin: Coin) {
     db().prepare("SELECT checked_at,capabilities FROM runtime_health WHERE id='worker'").first<{ checked_at: number;capabilities:string }>(),
     db().prepare('SELECT id,message,created_at FROM events WHERE coin_id=? ORDER BY created_at DESC LIMIT 8').bind(coin.id).all<{ id: string; message: string; created_at: string }>(),
     db().prepare('SELECT COUNT(*) AS entries,MAX(created_at) AS updated FROM agent_memories WHERE coin_id=?').bind(coin.id).first<{ entries: number; updated: number | null }>(),
+    agentTasks(coin.id),signalHistory(coin.id),
+    db().prepare("SELECT id,kind,status,amount_wei AS amountWei,tx_hash AS hash,reason,created_at AS createdAt FROM agent_operations WHERE coin_id=? AND kind!='compute' ORDER BY created_at DESC LIMIT 10").bind(coin.id).all(),
+    db().prepare('SELECT config FROM coins WHERE id=?').bind(coin.id).first<{config:string}>(),
   ]);
   let state = 'scheduled', changedAt: number | null = null;
-  const stale = !health || now - health.checked_at > 180000;
+  const stale = !health || now - health.checked_at > 180000 && !(lease&&lease.lease_until>now);
   let capable=false;try{capable=JSON.parse(health?.capabilities??'[]').includes('autonomous-planning')}catch{}
   if (!coin.tokenAddress) state = 'awaiting_launch';
   else if (stale) state = 'worker_unconfirmed';
@@ -33,5 +38,5 @@ export async function agentConsole(coin: Coin) {
   if(state==='scheduled'&&run?.status==='settled'&&!run.approved)state='planning_retry_scheduled';
   const lastPlan=run?{outcome:run.approved?'approved':run.status==='reserved'?'pending':'not_approved',startedAt:Date.parse(run.created_at),finishedAt:run.finished_at?Date.parse(run.finished_at):null}:null;
   return { state, changedAt, observedAt: now,lastCheckAt:lease?.last_checked_at??null, workerSeenAt: health?.checked_at ?? null, nextCheckAt: lease?.next_run_at && lease.next_run_at > now ? lease.next_run_at : null,nextPlanAt:lease?.next_plan_at&&lease.next_plan_at>now?lease.next_plan_at:null,lastPlan,
-    memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
+    tasks,signals,moves:moves.results,treasuryThesis:config?JSON.parse(config.config).treasuryThesis??null:null,memory: { entries: Number(memory?.entries ?? 0), updatedAt: memory?.updated ?? null }, events: events.results.map(e => ({ id: e.id, message: e.message, createdAt: e.created_at })) };
 }

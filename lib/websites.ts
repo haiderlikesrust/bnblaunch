@@ -15,8 +15,8 @@ export function websiteStatements(lease:{coinId:string;id:string},runId:string,s
 }
 
 export async function publishedWebsite(coinId:string){
- const row=await db().prepare(`SELECT s.content,s.revision,s.published_at,c.config FROM site_revisions s JOIN coins c ON c.id=s.coin_id
- WHERE s.coin_id=? AND c.token_address IS NOT NULL ORDER BY s.revision DESC LIMIT 1`).bind(coinId).first<{content:string;revision:number;published_at:number;config:string}>();
+ const row=await db().prepare(`SELECT s.id,s.content,s.revision,s.published_at,c.config FROM site_revisions s JOIN coins c ON c.id=s.coin_id
+ WHERE s.coin_id=? AND c.token_address IS NOT NULL ORDER BY s.revision DESC LIMIT 1`).bind(coinId).first<{id:string;content:string;revision:number;published_at:number;config:string}>();
  if(!row)return null;
- return {coin:JSON.parse(row.config) as Coin,site:{...websiteInput.parse(JSON.parse(row.content)),revision:row.revision,publishedAt:row.published_at,url:websitePath(coinId)}};
+ return {coin:JSON.parse(row.config) as Coin,site:{...websiteInput.parse(JSON.parse(row.content)),id:row.id,revision:row.revision,publishedAt:row.published_at,url:websitePath(coinId)}};
 }

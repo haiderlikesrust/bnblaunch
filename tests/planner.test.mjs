@@ -149,7 +149,7 @@ test('wallet checks run within one minute without repeating a paid plan',async()
   await runAgentTick(['autonomous-planning']);
   const schedule=f.sql.prepare('SELECT next_run_at,next_plan_at FROM runtime_leases').get();
   assert.ok(schedule.next_run_at-Date.now()<=60000&&schedule.next_run_at>Date.now());
-  assert.ok(schedule.next_plan_at-Date.now()>4*60000&&schedule.next_plan_at-Date.now()<=5*60000);
+  assert.ok(schedule.next_plan_at-Date.now()>50000&&schedule.next_plan_at-Date.now()<=60000);
   const calls=f.calls.length;
   f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();
   assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');
@@ -186,13 +186,13 @@ test('disabled X does not block planning when unused X billing is invalid',async
  finally{if(previous===undefined)delete env.X_READ_COST_MICROUSD;else env.X_READ_COST_MICROUSD=previous;f.close();}
 });
 
-test('missing research configuration records an actionable blocker without paid calls',async()=>{
+test('missing research configuration leaves useful non-research planning available',async()=>{
  const f=fixture(),previous=env.BRAVE_COST_MICROUSD;delete env.BRAVE_COST_MICROUSD;
  try{
   f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
-  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'research_configuration_required');
-  assert.equal(f.sql.prepare('SELECT last_reason FROM runtime_leases').get().last_reason,'research_configuration_required');
-  assert.equal(f.calls.length,0);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_runs').get().n,0);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  assert.equal(JSON.parse(f.calls[0].messages[1].content).researchTools.available,false);
+  assert.equal(f.calls.length,2);
  }finally{if(previous!==undefined)env.BRAVE_COST_MICROUSD=previous;f.close();}
 });
 
@@ -267,7 +267,7 @@ test('deployment wakes an old rejected plan without resetting approved or unsett
 });
 
 
-test('approved community work queues local text and schedules a mission follow-up within five minutes',async()=>{
+test('approved community work queues local text and schedules a mission follow-up on a funded one-minute pulse',async()=>{
  const f=fixture();try{
   f.output({...plan,nextCheckMinutes:240,website:null,nextResearchQuery:'Mars atmosphere recent research findings',publication:{destination:'gallery',text:'Our mission is to explore Mars through research and original work.',imagePrompt:null,altText:''}});
   f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
@@ -276,7 +276,7 @@ test('approved community work queues local text and schedules a mission follow-u
   const job=f.sql.prepare('SELECT payload,status FROM content_jobs').get();assert.equal(job.status,'queued');assert.equal(JSON.parse(job.payload).destination,'gallery');
   const config=JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config);assert.equal(config.nextResearchQuery,'Mars atmosphere recent research findings');
   const schedule=f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get();assert.ok(schedule.next_plan_at<=Date.now()+5*60000);
-  assert.equal(JSON.parse(f.calls[1].messages[1].content).plan.nextCheckMinutes,5);
+  assert.equal(JSON.parse(f.calls[1].messages[1].content).plan.nextCheckMinutes,1);
   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
  }finally{f.close();}
 });
@@ -298,5 +298,96 @@ test('community deployment wakes long approved waits but preserves reserved work
   f.sql.exec(migration);assert.equal(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at,0);
   f.sql.prepare('UPDATE runtime_leases SET next_plan_at=?').run(Date.now()+4*3600000);
   f.sql.prepare("UPDATE agent_runs SET status='reserved'").run();f.sql.exec(migration);assert.ok(f.sql.prepare('SELECT next_plan_at FROM runtime_leases').get().next_plan_at>Date.now());
+ }finally{f.close();}
+});
+
+const {pulseMinutes,treasuryThesis}=await import('../lib/agent-work-policy.ts');
+const task={id:null,goal:'Publish an introduction to our mission',nextStep:'Create a useful local community introduction',status:'active',evidence:null};
+test('adaptive pulse preserves a six-hour credit runway and validates public spending targets',()=>{
+ assert.equal(pulseMinutes(6000000,10000),1);assert.equal(pulseMinutes(600000,10000),6);assert.equal(pulseMinutes(0,10000),360);
+ assert.equal(treasuryThesis.safeParse({buyback:15,rewards:25,reserve:30,creative:30,reason:'Balance useful work with runway.'}).success,true);
+ assert.equal(treasuryThesis.safeParse({buyback:15,rewards:25,reserve:30,creative:90,reason:'Oversubscribed.'}).success,false);
+});
+test('tasks persist across cycles and completion requires a confirmed coin-scoped receipt',async()=>{
+ const f=fixture();try{
+  f.output({...plan,website:null,task,treasuryThesis:{buyback:0,rewards:25,reserve:35,creative:40,reason:'Keep operating runway before rewards.'}});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  const saved=f.sql.prepare('SELECT * FROM agent_tasks').get();assert.equal(saved.goal,task.goal);
+  assert.equal(JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config).treasuryThesis.rewards,25);
+  f.due();f.output({...plan,website:null,task:{...task,id:saved.id,status:'complete',evidence:{kind:'publication',id:'not-confirmed'}}});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(f.sql.prepare('SELECT status FROM agent_tasks').get().status,'active');
+  assert.equal(JSON.parse(f.calls[2].messages[1].content).tasks[0].id,saved.id);
+  f.sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at) VALUES('published','coin','{}','complete',?,?)").run(Date.now(),Date.now());
+  f.due();f.output({...plan,website:null,task:{...task,id:saved.id,status:'complete',nextStep:'Continue the next research question',evidence:{kind:'publication',id:'published'}}});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(f.sql.prepare('SELECT status FROM agent_tasks').get().status,'complete');
+ }finally{f.close();}
+});
+for(const mode of ['rejected','expired'])test(mode+' plans cannot save tasks or a treasury thesis',async()=>{
+ const f=fixture();try{
+  f.output({...plan,task,treasuryThesis:{buyback:0,rewards:25,reserve:35,creative:40,reason:'Preserve runway.'}});
+  if(mode==='rejected'){f.reject();await runAgentTick(['autonomous-planning']);}else{f.expire();await assert.rejects(runAgentTick(['autonomous-planning']));}
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_tasks').get().n,0);assert.equal(JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config).treasuryThesis,undefined);
+ }finally{f.close();}
+});
+test('research results feed the same cycle; repeating a recent question costs no second search',async()=>{
+ const f=fixture();let searches=0,step=0;env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';
+ globalThis.__plannerResearch=async coin=>{searches++;assert.equal(coin.nextResearchQuery,'Mars rover science');return [{title:'Rover results',url:'https://science.nasa.gov/mars/',description:'Verified source snippet.'}]};
+ try{
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
+  f.modifyReply((reply,guard)=>{if(!guard&&step++%2===0)reply.choices[0].message.content=JSON.stringify({tool:'research',query:'Mars rover science'});return reply;});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(searches,1);
+  const snapshot=JSON.parse(f.calls[1].messages[1].content);assert.equal(snapshot.researchResults[0].sources[0].title,'Rover results');
+  assert.equal(f.sql.prepare('SELECT cost_microusd FROM agent_runs').get().cost_microusd,5300);
+  f.due();await runAgentTick(['autonomous-planning']);assert.equal(searches,1);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM research_runs').get().n,1);
+  assert.equal(JSON.parse(f.calls[4].messages[1].content).researchResults[0].reused,true);
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS c FROM coins').get().c,994400);
+ }finally{delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;delete globalThis.__plannerResearch;f.close();}
+});
+test('research loop has a hard paid-step limit and never queues rejected work',async()=>{
+ const f=fixture();env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';try{
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));f.output({tool:'research',query:'Mars rover science'});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(f.calls.length,3);
+  assert.equal(f.sql.prepare('SELECT cost_microusd FROM agent_runs').get().cost_microusd,5300);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
+ }finally{delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;f.close();}
+});
+test('an uncertain follow-up model charge retains the whole cycle reservation',async()=>{
+ const f=fixture();let step=0;env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';try{
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));f.modifyReply((reply,guard)=>{if(!guard){if(step++===0)reply.choices[0].message.content=JSON.stringify({tool:'research',query:'Mars research'});else delete reply.usage;}return reply;});
+  await assert.rejects(runAgentTick(['autonomous-planning']),/reconciliation/);assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'provider_cost_reconciliation_required');
+ }finally{delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;f.close();}
+});
+test('a completed output wakes an approved slow pulse once and cannot bypass rejection backoff',async()=>{
+ const f=fixture();try{
+  await runAgentTick(['autonomous-planning']);const cfg=JSON.parse(f.sql.prepare('SELECT config FROM coins').get().config);
+  f.sql.prepare('UPDATE agent_runs SET finished_at=?').run(new Date(Date.now()-61000).toISOString());f.sql.prepare('UPDATE runtime_leases SET next_run_at=0,next_plan_at=?').run(Date.now()+600000);
+  f.sql.prepare("INSERT INTO content_jobs(id,coin_id,payload,status,created_at,updated_at) VALUES('done','coin','{}','complete',?,?)").run(Date.now(),cfg.workObservedAt+1);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');const n=f.calls.length;
+  f.sql.prepare('UPDATE runtime_leases SET next_run_at=0').run();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'awaiting_next_plan');assert.equal(f.calls.length,n);
+  const {hasNewWorkResult}=await import('../lib/agent-work.ts');assert.equal(await hasNewWorkResult('coin','wrong-run',0),false);
+ }finally{f.close();}
+});
+test('browser opens only discovered sources and feeds genuine captures back into the plan',async()=>{
+ const f=fixture();const fetchBefore=globalThis.fetch;env.BROWSER_URL='http://browser:8090';env.BROWSER_TOKEN='test-browser-token-'.repeat(4);env.BRAVE_API_KEY='test';env.BRAVE_COST_MICROUSD='5000';let step=0,captures=0;
+ try{
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
+  f.sql.prepare("INSERT INTO research_runs VALUES('source','coin','Mars','complete',?,?,?)").run(JSON.stringify([{title:'Mars',url:'https://science.nasa.gov/mars/',description:'Science'}]),Date.now(),Date.now());
+  globalThis.fetch=async(url,init)=>{if(String(url).endsWith('/healthz'))return new Response('{}');if(String(url).endsWith('/capture')){captures++;assert.equal(JSON.parse(init.body).url,'https://science.nasa.gov/mars/');return Response.json({url:'https://science.nasa.gov/mars/',title:'Mars science',text:'A page excerpt actually retrieved by the browser.',frames:[{base64:'/9j/2Q==',scrollY:0}]});}return fetchBefore(url,init)};
+  f.modifyReply((reply,guard)=>{if(!guard&&step++===0)reply.choices[0].message.content=JSON.stringify({tool:'browse',url:'https://science.nasa.gov/mars/'});return reply;});
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(captures,1);assert.match(JSON.parse(f.calls[1].messages[1].content).browserResults[0].text,/actually retrieved/);
+  assert.equal(f.sql.prepare('SELECT status FROM browser_sessions').get().status,'complete');assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM browser_frames').get().n,1);
+  f.due();f.output({tool:'browse',url:'http://127.0.0.1/'});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(captures,1);
+ }finally{delete env.BROWSER_URL;delete env.BROWSER_TOKEN;delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;f.close();}
+});
+
+test('task ownership and the three-active-task limit are enforced independently of the model',async()=>{
+ const f=fixture();try{
+  const {validateTask}=await import('../lib/agent-work.ts');
+  for(let i=0;i<3;i++)f.sql.prepare("INSERT INTO agent_tasks VALUES(?,'coin','A goal','Next step','active',NULL,?,?)").run('task'+i,Date.now(),Date.now());
+  await assert.rejects(validateTask('coin',task),/limit/);await assert.rejects(validateTask('another',{...task,id:'task0'}),/belong/);
+  f.sql.prepare("INSERT INTO agent_operations(id,coin_id,kind,amount_wei,status,expires_at,created_at,reason) VALUES('reward','coin','rewards','10','queued',?,?, 'Pending reward')").run(Date.now()+100000,Date.now());
+  const finished={...task,id:'task0',status:'complete',evidence:{kind:'treasury',id:'reward'}};
+  await assert.rejects(validateTask('coin',finished),/not confirmed/);
+  f.sql.prepare("UPDATE agent_operations SET status='confirmed'").run();await validateTask('coin',finished);
  }finally{f.close();}
 });

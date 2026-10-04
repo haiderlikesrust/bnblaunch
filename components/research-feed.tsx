@@ -2,9 +2,12 @@
 import { useEffect, useState } from 'react';
 import { ArrowUpRight, Globe2, LoaderCircle, Search } from 'lucide-react';
 import type { ResearchPreview } from '@/lib/research-preview';
+import ResearchBrowser from './research-browser';
+import type { BrowserSession } from '@/lib/browser-research';
 import type { T } from '@/lib/ui';
 
 export default function ResearchFeed({ coinId, enabled, t }: { coinId: string; enabled: boolean; t: T }) {
+  const [browserSessions,setBrowserSessions]=useState<BrowserSession[]>([]);
   const [searches, setSearches] = useState<ResearchPreview[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState(false);
   useEffect(() => {
     let active = true;
@@ -13,12 +16,12 @@ export default function ResearchFeed({ coinId, enabled, t }: { coinId: string; e
       try {
         const response = await fetch(`/api/coins/${coinId}/research`, { signal: controller.signal });
         if (!response.ok) throw Error('Research unavailable');
-        const data = await response.json() as { searches: ResearchPreview[] };
-        if (active) { setSearches(data.searches); setError(false); }
+        const data = await response.json() as { searches: ResearchPreview[];browserSessions?:BrowserSession[] };
+        if (active) { setSearches(data.searches);setBrowserSessions(data.browserSessions??[]); setError(false); }
       } catch { if (active) setError(true); }
       finally { if (active) setLoading(false); }
     }
-    setSearches([]); setLoading(true); setError(false);
+    setSearches([]);setBrowserSessions([]); setLoading(true); setError(false);
     void load();
     const timer = setInterval(() => { if (!document.hidden) void load(); }, 15000);
     return () => { active = false; controller.abort(); clearInterval(timer); };
@@ -27,6 +30,7 @@ export default function ResearchFeed({ coinId, enabled, t }: { coinId: string; e
   return <section className="panel research-panel" aria-label={t('公开研究记录', 'Public research feed')}>
     <div className="research-heading"><div className="research-emblem"><Globe2 size={24}/></div><div><span className="overline accent">{t('智能体观察室', 'AGENT OBSERVATORY')}</span><h2>{t('跟随它的好奇心。', 'Follow its curiosity.')}</h2></div><span className="research-public">{t('公开记录', 'PUBLIC FEED')}</span></div>
     <p className="research-intro">{t('查看智能体实际搜索的内容与发现的来源。以下为搜索结果摘要，不代表已阅读全文或认可来源。', 'See what the agent searches for and the sources it discovers. These are search snippets, not evidence that it read or endorsed the full pages.')}</p>
+    <ResearchBrowser sessions={browserSessions} t={t}/>
     {error && <p className="form-error" role="status">{t('暂时无法刷新研究记录。稍后自动重试。', 'Could not refresh research. Retrying shortly.')}</p>}
     {loading ? <div className="empty-state" role="status"><LoaderCircle className="spin"/><p>{t('正在读取研究记录…', 'Loading research…')}</p></div> : searches.length ? <div className="research-history">{searches.map((search, index) => <article className="research-session" key={search.id}>
       <div className="research-session-meta"><span className="overline">{index === 0 ? t('最近搜索', 'LATEST SEARCH') : t('搜索记录', 'SEARCH LOG')}</span><time dateTime={new Date(search.startedAt).toISOString()}>{new Date(search.startedAt).toLocaleString()}</time><span className={'research-state ' + search.status}>{search.status === 'searching' && <LoaderCircle size={12} className="spin"/>}{labels[search.status]}</span></div>

@@ -7,7 +7,7 @@ for(const name of ['SHEN_APP_URL','WORKER_TOKEN','SIGNER_WORKER_TOKEN']) if(!env
 const app=new URL(env.SHEN_APP_URL),signer=new URL(env.SIGNER_INTERNAL_URL??'http://signer:8080');
 if((app.protocol!=='https:'&&!(app.protocol==='http:'&&app.hostname==='web'&&app.port==='3000'))||app.username||app.password) throw Error('Only the private web service may use HTTP');
 if(signer.protocol!=='https:'&&!(signer.protocol==='http:'&&signer.hostname==='signer')) throw Error('Only the private signer service may use HTTP');
-let stopping=false,lastSuccess=0,stage='starting';
+let stopping=false,lastSuccess=0,stage='starting',tickStarted=0;
 async function request(base,path,token,data,site=false){
   return serviceRequest(base,path,token,data,site?env.SHEN_SITE_ACCESS_TOKEN:undefined);
 }
@@ -43,9 +43,9 @@ async function cycle(){
     try{await site({action:'reconcile',id:op.id});}catch{console.warn('Operation settlement is pending.');}
   }
   stage='domain_tick';await site({action:'domains'});
-  stage='agent_tick';await site({action:'tick'});lastSuccess=Date.now();
+  stage='agent_tick';tickStarted=Date.now();await site({action:'tick'});lastSuccess=Date.now();
 }
-const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000;res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});
+const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000||(stage==='agent_tick'&&Date.now()-tickStarted<450000);res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});
 health.listen(Number(env.PORT??8081),'0.0.0.0');
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{stopping=true;health.close();});
 while(!stopping){try{await cycle();}catch(error){console.warn(`Agent worker failed [${stage}/${failureCode(error)}]. No success has been recorded.`);}if(!stopping)await delay(15000);}

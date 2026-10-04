@@ -39,3 +39,13 @@ CMD ["node","index.mjs"]
 FROM nginx:1.28-alpine AS gateway
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 3187
+
+FROM node:24-bookworm-slim AS browser
+WORKDIR /app
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright NODE_ENV=production PORT=8090
+COPY services/browser/package*.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npx playwright install --with-deps chromium
+COPY --chown=node:node services/browser/*.mjs ./
+USER node
+EXPOSE 8090
+CMD ["node","index.mjs"]

@@ -40,6 +40,8 @@ services:
       OPENROUTER_MANAGEMENT_KEY: ${OPENROUTER_MANAGEMENT_KEY:-}
       OPENROUTER_IMAGE_MODEL: ${OPENROUTER_IMAGE_MODEL:-bytedance-seed/seedream-4.5}
       CHAT_DAILY_LIMIT_MICROUSD: ${CHAT_DAILY_LIMIT_MICROUSD:-0}
+      BROWSER_URL: http://browser:8090
+      BROWSER_TOKEN: ${BROWSER_TOKEN:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       BRAVE_COST_MICROUSD: ${BRAVE_COST_MICROUSD:-0}
       X_CLIENT_ID: ${X_CLIENT_ID:-}
@@ -58,7 +60,7 @@ services:
       DOKPLOY_API_KEY: ${DOKPLOY_API_KEY:-}
       DOKPLOY_COMPOSE_ID: ${DOKPLOY_COMPOSE_ID:-}
       HOSTING_IPV4: ${HOSTING_IPV4:-}
-    networks: [app, database, signing]
+    networks: [app, database, signing, browser-control]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -71,7 +73,7 @@ services:
       target: worker
     restart: unless-stopped
     init: true
-    stop_grace_period: 210s
+    stop_grace_period: 450s
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -128,6 +130,28 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  browser:
+    build:
+      context: .
+      target: browser
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true, seccomp:./services/browser/seccomp.json]
+    tmpfs: [/tmp]
+    shm_size: 256mb
+    mem_limit: 1g
+    pids_limit: 256
+    environment:
+      BROWSER_TOKEN: ${BROWSER_TOKEN:-}
+    networks: [browser-control, browser-egress]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -151,5 +175,8 @@ networks:
     external: true
   app:
   signing:
+  browser-control:
+    internal: true
+  browser-egress:
   database:
     internal: true
