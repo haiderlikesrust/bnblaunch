@@ -31,7 +31,7 @@ CMD ["node","services/signer/index.mjs"]
 
 FROM node:24-bookworm-slim AS worker
 WORKDIR /app
-COPY --chown=node:node services/worker/index.mjs ./index.mjs
+COPY --chown=node:node services/worker/*.mjs ./
 USER node
 ENV NODE_ENV=production PORT=8081
 CMD ["node","index.mjs"]
