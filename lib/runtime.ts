@@ -21,7 +21,9 @@ import { publishedWebsite, websiteStatements } from './websites';
 import { domainSnapshot, domainOrderStatement, domainsConfigured } from './domain-runtime';
 import { boundedPlanningContext } from './planning-context';
 import { websiteTiming } from './website-timing';
-const PLANNER_OUTPUT_TOKENS=2200;
+// Reasoning and visible JSON share the provider's output limit.
+const PLANNER_OUTPUT_TOKENS=8192;
+const GUARD_OUTPUT_TOKENS=4096;
 
 type Lease={coinId:string;id:string};
 export async function requireWorker(request:Request){
@@ -106,7 +108,7 @@ export async function runAgentTick(capabilities?:string[]){
     const prices=await Promise.all([chatPrice(agentModel(coin.modelId).id),chatPrice(GUARDRAIL_MODEL)]);
     const researchCost=coin.research?Number(env.BRAVE_COST_MICROUSD):0;
     if(coin.research&&(!Number.isSafeInteger(researchCost)||researchCost<=0||!env.BRAVE_API_KEY))return tickResult("research_configuration_required");
-    const ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)+callCeiling(prices[1],800,64000)+researchCost;
+    const ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)+callCeiling(prices[1],GUARD_OUTPUT_TOKENS,64000)+researchCost;
     lastReason="social_billing_invalid";
     const xRates=coin.social?xCosts("https://shen.now"):null;
     const contentAllowance=(coin.images?125000:0)+(xRates?xRates.post+xRates.upload+xRates.read*3:0);
@@ -162,15 +164,15 @@ export async function runAgentTick(capabilities?:string[]){
     lastReason="planner_request_failed";
     let result;
     try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS,32000,{coinId:coin.id,runId:run.id,kind:"planner"});}catch(error){
-      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return tickResult("plan_rejected");}
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return tickResult(error.truncated?"planner_output_truncated":"plan_rejected");}
       if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,researchCost,'Planner request rejected before dispatch.');throw error;
     }
     let plan;
     try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return tickResult("plan_rejected");}
     lastReason="guard_request_failed";
     let guard;
-    try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},800,64000,{coinId:coin.id,runId:run.id,kind:"plan-guard"});}catch(error){
-      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return tickResult("plan_rejected");}
+    try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},GUARD_OUTPUT_TOKENS,64000,{coinId:coin.id,runId:run.id,kind:"plan-guard"});}catch(error){
+      if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return tickResult(error.truncated?"guard_output_truncated":"plan_rejected");}
       if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,result.cost+researchCost,'Guard request rejected before dispatch.');throw error;
     }
     lastReason="plan_save_failed";

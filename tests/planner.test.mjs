@@ -30,7 +30,7 @@ function fixture(){
  globalThis.fetch=async(url,init={})=>{const u=String(url);
   if(u.endsWith('/balance'))return json({address:wallet,tokenAddress:token,balanceWei:'1000000000000000000',observedAt:now,block:'100',...walletResult});
   if(u.endsWith('/v1/status'))return json({chainId:56,signingReady:true,settlementAddress:wallet,gasReserveWei:'2000000000000000',buybacksEnabled:false});
-  if(u.endsWith('/v1/models'))return json({data:[...new Set([DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL])].map(id=>({id,pricing:{prompt:'0.000001',completion:'0.000001'},supported_parameters:['response_format']}))});
+  if(u.endsWith('/v1/models'))return json({data:[...new Set([DEFAULT_AGENT_MODEL,GUARDRAIL_MODEL])].map(id=>({id,pricing:{prompt:'0.000001',completion:'0.000001'},supported_parameters:['response_format','reasoning'],reasoning:{supported_efforts:['max','high','low'],mandatory:true}}))});
   if(u.endsWith('/v1/credits'))return json({data:{total_credits:100000,total_usage:0}});
   if(u.includes('geckoterminal'))return json({data:{id:'bsc_'+token,attributes:{address:token,market_cap_usd:'42000',fdv_usd:'50000',price_usd:'.01',total_reserve_in_usd:'5000',volume_usd:{h24:'900'}},relationships:{top_pools:{data:[]}}}});
   if(u.endsWith('/chat/completions')){const body=JSON.parse(init.body);calls.push(body);const guard=body.messages[0].content.startsWith('Independently');if(fail)throw Error('Provider timeout');if(guard&&expiry)sql.prepare('UPDATE runtime_leases SET lease_until=0').run();return json(modifyReply({choices:[{finish_reason:'stop',message:{content:JSON.stringify(guard?{allow:!reject,reason:'Checked'}:output)}}],usage:{cost:.0001}},guard))}
@@ -42,7 +42,7 @@ test('funded planner has no daily money cap, receives market/fee/cost context an
  const f=fixture();try{
   f.sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,cost_microusd,created_at) VALUES('past','coin','plan','settled',0,9000000000,?)").run(new Date().toISOString());
   const result=await runAgentTick(['autonomous-planning']);assert.equal(result.reason,'plan_completed');
-  const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.spending.dailyMonetaryLimit,null);assert.equal(Number(snapshot.spending.serviceCostMicrousd.lastHour),9000000000);assert.equal(snapshot.spending.market.valuation.marketCapUsd,42000);assert.equal(snapshot.spending.feeFlow.status,'baseline');assert.equal(snapshot.hasPublishedWebsite,false);assert.equal(f.calls[0].max_tokens,2200);
+  const snapshot=JSON.parse(f.calls[0].messages[1].content);assert.equal(snapshot.spending.dailyMonetaryLimit,null);assert.equal(Number(snapshot.spending.serviceCostMicrousd.lastHour),9000000000);assert.equal(snapshot.spending.market.valuation.marketCapUsd,42000);assert.equal(snapshot.spending.feeFlow.status,'baseline');assert.equal(snapshot.hasPublishedWebsite,false);assert.equal(f.calls[0].max_tokens,8192);assert.equal(f.calls[1].max_tokens,4096);assert.equal(f.calls[0].reasoning.effort,'low');assert.equal(f.calls[1].reasoning.effort,'low');const reservation=f.sql.prepare('SELECT reserved_microusd FROM agent_runs WHERE reserved_microusd>0 LIMIT 1').get();assert.equal(reservation.reserved_microusd,124308);
   const live=await publishedWebsite('coin');assert.equal(live.site.title,site.title);assert.equal(live.site.url,'/sites/coin');assert.equal(live.site.revision,1);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,999800);
   f.due();await runAgentTick(['autonomous-planning']);assert.equal((await publishedWebsite('coin')).site.revision,1,'identical content does not create another revision');
  }finally{f.close()}
@@ -67,7 +67,7 @@ test('guarded agent reward proposal enters the durable queue without public reci
 for(const rejectGuard of [false,true])test(`a truncated ${rejectGuard?'guard':'planner'} response settles its verified cost and allows the next plan`,async()=>{
  const f=fixture();try{
   f.modifyReply((reply,guard)=>{if(guard===rejectGuard)reply.choices[0].finish_reason='length';return reply});
-  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(f.calls.length,rejectGuard?2:1);assert.equal(await publishedWebsite('coin'),null);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,rejectGuard?'guard_output_truncated':'planner_output_truncated');assert.equal(f.calls.length,rejectGuard?2:1);assert.equal(await publishedWebsite('coin'),null);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
   const run=f.sql.prepare('SELECT status,cost_microusd FROM agent_runs').get();assert.equal(run.status,'settled');assert.equal(run.cost_microusd,rejectGuard?200:100);assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,1000000-run.cost_microusd);
   f.modifyReply(reply=>reply);f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal((await publishedWebsite('coin')).site.revision,1);
  }finally{f.close()}
