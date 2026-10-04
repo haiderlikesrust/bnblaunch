@@ -224,6 +224,9 @@ export async function runAgentTick(capabilities?:string[]){
       const found=fullSources.slice(0,3).map(s=>({title:s.title.slice(0,120),url:s.url.slice(0,512),description:s.description.slice(0,400)}));
       snapshot.sources=found;
       snapshot.researchResults.push({id,query,reused:!!prior,sources:found});
+      // One real source preview per cycle, in addition to the bounded model
+      // tool steps. Persist it even if the final plan is later rejected.
+      if(canBrowse&&snapshot.browserResults.length===0&&fullSources[0])snapshot.browserResults.push(await browseResearch(coin.id,run.id+':preview',fullSources[0].url));
       snapshot.recentResearch=history.slice(0,6).map(r=>({id:r.id,query:r.query,status:r.status,finishedAt:r.finishedAt,sources:r.sources.slice(0,2).map(s=>({title:s.title,url:s.url}))}));
     }
     let plan;

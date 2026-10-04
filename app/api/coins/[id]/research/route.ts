@@ -1,5 +1,5 @@
 import { db, response, failure, AppError } from '@/lib/server';
-import { browserHistory } from '@/lib/browser-research';
+import { browserHistory, browserStatus } from '@/lib/browser-research';
 import { getUser } from '@/lib/auth';
 import { researchHistory } from '@/lib/research-history';
 
@@ -13,7 +13,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       if (user) coin = await db().prepare('SELECT id FROM coins WHERE id=? AND owner=?').bind(id, user.userId).first();
     }
     if (!coin) throw new AppError(404, 'Coin not found.');
-    const [searches,browserSessions]=await Promise.all([researchHistory(id),browserHistory(id)]);
-    return response({searches,browserSessions});
+    const [searches,browserSessions,browser]=await Promise.all([researchHistory(id),browserHistory(id),browserStatus()]);
+    return response({searches,browserSessions,browserStatus:browser});
   } catch (error) { return failure(error); }
 }

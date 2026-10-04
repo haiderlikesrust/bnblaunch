@@ -3,7 +3,12 @@ import { timingSafeEqual } from 'node:crypto';
 import { chromium } from 'playwright';
 import { capturePage } from './render.mjs';
 const token=process.env.BROWSER_TOKEN??'';let busy=false,ready=false;
-if(token.length>=40)try{const probe=await chromium.launch({headless:true,chromiumSandbox:true});await probe.close();ready=true;}catch{console.warn('Browser sandbox could not start. Check host user namespaces and the supplied seccomp profile.');}
+if(token.length>=40)try{const probe=await chromium.launch({headless:true,chromiumSandbox:true});await probe.close();ready=true;}catch(error){
+  console.warn('Browser sandbox could not start. Check host user namespaces and the supplied seccomp profile.');
+  // Startup has no page input or authentication headers. Keep the native
+  // diagnostic in container logs, never in the public health response.
+  console.warn(String(error instanceof Error?error.message:error).split(token).join('[redacted]').slice(0,6000));
+}
 const authorized=value=>{const a=Buffer.from(value??''),b=Buffer.from('Bearer '+token);return token.length>=40&&a.length===b.length&&timingSafeEqual(a,b)};
 createServer(async(req,res)=>{
   const send=(code,value)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};

@@ -17,11 +17,19 @@ const originalFetch=globalThis.fetch;
 const token='0x1111111111111111111111111111111111117777',wallet='0x2222222222222222222222222222222222222222',processor='0x3333333333333333333333333333333333333333';
 const site={title:'A community with a curious mind',tagline:'Research, explain, create.',about:'A community exploring verified developments on BNB.',theme:'jade',layout:'editorial',sections:[{heading:'Our purpose',body:'Explain verified progress.'}],faq:[{question:'Who manages the agent?',answer:'The agent operates independently after launch.'}]};
 const plan={summary:'Publish the community website.',nextCheckMinutes:60,closeChatMinutes:0,transaction:{kind:'none',amountWei:'0',reason:'No transaction needed.'},website:site,publication:null};
+
+test('a longer explanatory summary still requires review and persists as plan memory',async()=>{
+ const f=fixture();try{
+  const summary='Explain the research findings and continue useful community work. '.repeat(10);
+  f.output({...plan,summary});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  assert.equal(f.calls.length,2);assert.equal(f.sql.prepare('SELECT summary FROM agent_memories').get().summary,summary.trim());
+ }finally{f.close();}
+});
 test('schema rejection records safe field feedback and the next attempt can correct it',async()=>{
  const f=fixture();try{
-  f.output({...plan,summary:'private text '.repeat(40)});
+  f.output({...plan,summary:'private text '.repeat(200)});
   const rejected=await runAgentTick(['autonomous-planning']);
-  assert.match(rejected.rejection.message,/summary: exceeds the maximum of 400/);
+  assert.match(rejected.rejection.message,/summary: exceeds the maximum of 2000/);
   assert.equal(JSON.stringify(rejected).includes('private text'),false);
   assert.equal(f.calls.length,1);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
   assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,999900);
@@ -431,6 +439,40 @@ test('browser opens only discovered sources and feeds genuine captures back into
   assert.equal(f.sql.prepare('SELECT status FROM browser_sessions').get().status,'complete');assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM browser_frames').get().n,1);
   f.due();f.output({tool:'browse',url:'http://127.0.0.1/'});assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_rejected');assert.equal(captures,1);
  }finally{delete env.BROWSER_URL;delete env.BROWSER_TOKEN;delete env.BRAVE_API_KEY;delete env.BRAVE_COST_MICROUSD;f.close();}
+});
+
+for(const mode of ['ready','unavailable','capture_failed','rejected'])test(`search source preview: ${mode}`,async()=>{
+ const f=fixture(),fetchBefore=globalThis.fetch;let step=0,captures=0;
+ Object.assign(env,{BROWSER_URL:'http://browser:8090',BROWSER_TOKEN:'test-browser-token-'.repeat(4),BRAVE_API_KEY:'test',BRAVE_COST_MICROUSD:'5000'});
+ globalThis.__plannerResearch=async()=>[{title:'Mars',url:'https://science.nasa.gov/mars/',description:'Science snippet'}];
+ try{
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
+  globalThis.fetch=async(url,init)=>{
+   if(String(url).endsWith('/healthz'))return new Response('{}',{status:mode==='unavailable'?503:200});
+   if(String(url).endsWith('/capture')){captures++;assert.equal(JSON.parse(init.body).url,'https://science.nasa.gov/mars/');return mode==='capture_failed'?new Response('{}',{status:502}):Response.json({url:'https://science.nasa.gov/mars/',title:'Mars',text:'Actual page excerpt',frames:[{base64:'/9j/2Q==',scrollY:0}]});}
+   return fetchBefore(url,init);
+  };
+  f.modifyReply((reply,guard)=>{if(!guard&&step++<2)reply.choices[0].message.content=JSON.stringify({tool:'research',query:'Mars science'});return reply;});
+  if(mode==='rejected')f.reject();
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,mode==='rejected'?'plan_rejected':'plan_completed');
+  assert.equal(captures,mode==='unavailable'?0:1,'at most one automatic capture across both search steps');
+  const context=JSON.parse(f.calls[1].messages[1].content);
+  if(mode==='unavailable')assert.deepEqual(context.browserResults,[]);
+  else{
+   assert.equal(context.browserResults[0].status,mode==='capture_failed'?'unavailable':'complete');
+   assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM browser_frames').get().n,mode==='capture_failed'?0:1);
+  }
+ }finally{for(const key of ['BROWSER_URL','BROWSER_TOKEN','BRAVE_API_KEY','BRAVE_COST_MICROUSD'])delete env[key];delete globalThis.__plannerResearch;f.close();}
+});
+
+test('browser readiness distinguishes missing setup, unhealthy service and a successful probe',async()=>{
+ const {browserStatus}=await import('../lib/browser-research.ts');
+ try{
+  assert.equal(await browserStatus(),'not_configured');env.BROWSER_URL='http://browser:8090';env.BROWSER_TOKEN='test-browser-token-'.repeat(4);
+  globalThis.fetch=async()=>new Response('{}',{status:503});assert.equal(await browserStatus(),'unavailable');
+  globalThis.fetch=async()=>{throw Error('offline')};assert.equal(await browserStatus(),'unavailable');
+  globalThis.fetch=async()=>new Response('{}');assert.equal(await browserStatus(),'ready');
+ }finally{delete env.BROWSER_URL;delete env.BROWSER_TOKEN;globalThis.fetch=originalFetch;}
 });
 
 test('task ownership and the three-active-task limit are enforced independently of the model',async()=>{
