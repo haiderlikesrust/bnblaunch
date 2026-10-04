@@ -8,5 +8,7 @@ export async function connectWallet(){
   const challenge=await post({action:'challenge',wallet:accounts[0]});
   const signature=await window.ethereum.request({method:'personal_sign',params:[stringToHex(challenge.message),accounts[0]]});
   await post({action:'verify',id:challenge.id,signature});
+  // Other open tabs share the cookie; notify them without storing credentials.
+  try{localStorage.setItem('shen-auth-version',crypto.randomUUID())}catch{}
   window.dispatchEvent(new Event('shen-auth-changed'));return accounts[0];
 }

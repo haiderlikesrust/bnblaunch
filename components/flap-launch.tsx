@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { findSalt } from "@/lib/flap";
 import { stringToHex } from "viem";
+import { verifyLaunchWallet } from "@/lib/launch-wallet";
 import { LoaderCircle, ShieldCheck, Upload, ExternalLink, Wallet } from "lucide-react";
 import type { Coin } from "@/lib/model";
 type Plan={planId:string;transaction:Record<string,string>;predictedAddress:string;treasury:string};
@@ -23,6 +24,7 @@ export default function FlapLaunch({coin,onConfirmed}:{coin:Coin;onConfirmed:(c:
       if(!file&&!coin.imageUrl)throw new Error("Choose a token logo first.");
       const accounts=await window.ethereum.request({method:"eth_requestAccounts"}) as string[];
       if(!accounts[0])throw new Error("Connect your launch wallet.");
+      await verifyLaunchWallet(accounts[0]);
       const chain=await window.ethereum.request({method:"eth_chainId"});if(chain!=="0x38")throw new Error("Switch your wallet to BNB Chain (56) and retry.");
       setMessage("Preparing the agent’s dedicated wallet…");
       const auth=await post({action:"authorize",creator:accounts[0]}) as {authorizationId:string;message:string};
