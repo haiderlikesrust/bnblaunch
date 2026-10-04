@@ -17,6 +17,33 @@ const originalFetch=globalThis.fetch;
 const token='0x1111111111111111111111111111111111117777',wallet='0x2222222222222222222222222222222222222222',processor='0x3333333333333333333333333333333333333333';
 const site={title:'A community with a curious mind',tagline:'Research, explain, create.',about:'A community exploring verified developments on BNB.',theme:'jade',layout:'editorial',sections:[{heading:'Our purpose',body:'Explain verified progress.'}],faq:[{question:'Who manages the agent?',answer:'The agent operates independently after launch.'}]};
 const plan={summary:'Publish the community website.',nextCheckMinutes:60,closeChatMinutes:0,transaction:{kind:'none',amountWei:'0',reason:'No transaction needed.'},website:site,publication:null};
+test('schema rejection records safe field feedback and the next attempt can correct it',async()=>{
+ const f=fixture();try{
+  f.output({...plan,summary:'private text '.repeat(40)});
+  const rejected=await runAgentTick(['autonomous-planning']);
+  assert.match(rejected.rejection.message,/summary: exceeds the maximum of 400/);
+  assert.equal(JSON.stringify(rejected).includes('private text'),false);
+  assert.equal(f.calls.length,1);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
+  assert.equal(f.sql.prepare('SELECT ai_credit_microusd AS credit FROM coins').get().credit,999900);
+  f.output(plan);f.due();assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');
+  const retry=JSON.parse(f.calls[1].messages[1].content);
+  assert.equal(retry.previousRejection.code,'schema');assert.equal(retry.previousRejection.issues[0].path[0],'summary');
+  assert.equal(f.calls.length,3,'corrected plan still requires independent review');
+ }finally{f.close();}
+});
+test('policy and guard rejections retain corrective feedback without returning private reviewer prose',async()=>{
+ const f=fixture();try{
+  f.output({...plan,task:{id:null,goal:'Read Mars science',nextStep:'Find a source',status:'active',evidence:{kind:'research',id:'made-up'}}});
+  const rejected=await runAgentTick(['autonomous-planning']);
+  assert.match(rejected.rejection.message,/Only completed tasks carry completion evidence/);
+  f.output(plan);f.due();f.modifyReply((reply,guard)=>{if(guard)reply.choices[0].message.content=JSON.stringify({allow:false,reason:'private reviewer feedback'});return reply;});
+  const guarded=await runAgentTick(['autonomous-planning']);assert.equal(guarded.rejection.code,'guard_denied');assert.equal(JSON.stringify(guarded).includes('private reviewer'),false);
+  f.due();await runAgentTick(['autonomous-planning']);
+  assert.equal(JSON.parse(f.calls[3].messages[1].content).previousRejection.reviewReason,'private reviewer feedback');
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM events').get().n,0);
+  assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_tasks').get().n,0);
+ }finally{f.close();}
+});
 function fixture(){
  const sql=new DatabaseSync(':memory:');sql.exec('PRAGMA foreign_keys=ON');for(const name of readdirSync('drizzle').filter(n=>n.endsWith('.sql')).sort())sql.exec(readFileSync('drizzle/'+name,'utf8'));
  function prepare(query,values=[]){return {bind(...v){return prepare(query,v)},async run(){return {meta:{changes:Number(sql.prepare(query).run(...values).changes)}}},async all(){return {results:sql.prepare(query).all(...values)}},async first(){return sql.prepare(query).get(...values)??null}}}

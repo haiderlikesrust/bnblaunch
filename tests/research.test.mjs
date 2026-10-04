@@ -99,6 +99,12 @@ test('routine checks preserve a rejected plan outcome and expose the separate pl
   sql.prepare("INSERT INTO agent_runs(id,coin_id,kind,status,reserved_microusd,created_at,finished_at,output) VALUES('attempt','coin','plan','settled',100,?,?,?)").run(started,new Date(now-45000).toISOString(),'private rejected output');
   const get=async()=>await (await consoleGET(new Request('https://shen.now'),{params:Promise.resolve({id:'coin'})})).json();
   const rejected=await get();assert.equal(rejected.state,'planning_retry_scheduled');assert.equal(rejected.nextCheckAt,now+60000);assert.equal(rejected.nextPlanAt,now+840000);assert.equal(rejected.lastPlan.outcome,'not_approved');assert.equal(JSON.stringify(rejected).includes('private'),false);
+  sql.prepare('UPDATE agent_runs SET output=?').run(JSON.stringify({rejection:{code:'schema',issues:[{path:['summary'],rule:'too_big',limit:400}]}}));
+  assert.match((await get()).lastPlan.rejection.message,/summary: exceeds the maximum of 400/);
+  sql.prepare('UPDATE agent_runs SET output=?').run(JSON.stringify({rejection:{code:'guard_denied',reviewReason:'private review text'}}));
+  const reviewed=await get();assert.equal(reviewed.lastPlan.rejection.code,'guard_denied');assert.equal(JSON.stringify(reviewed).includes('private'),false);
+  sql.prepare('UPDATE agent_runs SET output=?').run(JSON.stringify({rejection:{code:'schema',issues:[{path:['private-secret-key'],rule:'too_big',limit:400}]}}));
+  assert.equal((await get()).lastPlan.rejection,null);
   sql.prepare("INSERT INTO agent_memories VALUES('attempt','coin','private summary','private next steps',?)").run(now);
   const approved=await get();assert.equal(approved.state,'scheduled');assert.equal(approved.lastPlan.outcome,'approved');assert.equal(JSON.stringify(approved).includes('private'),false);
  }finally{sql.close();}

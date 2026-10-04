@@ -43,7 +43,8 @@ async function cycle(){
     try{await site({action:'reconcile',id:op.id});}catch{console.warn('Operation settlement is pending.');}
   }
   stage='domain_tick';await site({action:'domains'});
-  stage='agent_tick';tickStarted=Date.now();await site({action:'tick'});lastSuccess=Date.now();
+  stage='agent_tick';tickStarted=Date.now();const tick=await site({action:'tick'});lastSuccess=Date.now();
+  if(tick?.rejection)console.warn(`Agent plan rejected [${tick.rejection.code}]: ${tick.rejection.message}`);
 }
 const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000||(stage==='agent_tick'&&Date.now()-tickStarted<450000);res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});
 health.listen(Number(env.PORT??8081),'0.0.0.0');
