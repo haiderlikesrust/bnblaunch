@@ -1,23 +1,24 @@
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
+import {serviceRequest,failureCode} from './request.mjs';
 
 const env=process.env;
 for(const name of ['SHEN_APP_URL','WORKER_TOKEN','SIGNER_WORKER_TOKEN']) if(!env[name]||((name.endsWith('TOKEN'))&&env[name].length<40)) throw Error(name+' is required');
 const app=new URL(env.SHEN_APP_URL),signer=new URL(env.SIGNER_INTERNAL_URL??'http://signer:8080');
 if((app.protocol!=='https:'&&!(app.protocol==='http:'&&app.hostname==='web'&&app.port==='3000'))||app.username||app.password) throw Error('Only the private web service may use HTTP');
 if(signer.protocol!=='https:'&&!(signer.protocol==='http:'&&signer.hostname==='signer')) throw Error('Only the private signer service may use HTTP');
-let stopping=false,lastSuccess=0;
+let stopping=false,lastSuccess=0,stage='starting';
 async function request(base,path,token,data,site=false){
-  const response=await fetch(new URL(path,base),{method:data===undefined?'GET':'POST',redirect:'error',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',...(site&&env.SHEN_SITE_ACCESS_TOKEN?{'OAI-Sites-Authorization':'Bearer '+env.SHEN_SITE_ACCESS_TOKEN}:{})},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(180000)});
-  if(!response.ok)throw Error('Service returned HTTP '+response.status);
-  return response.json();
+  return serviceRequest(base,path,token,data,site?env.SHEN_SITE_ACCESS_TOKEN:undefined);
 }
 const site=(data)=>request(app,'/api/internal/worker',env.WORKER_TOKEN,data,true);
 async function cycle(){
-  try{await site({action:'index'});}catch{console.warn('Curve indexing awaits an available canonical RPC range.');}
+  try{await site({action:'index'});}catch(error){console.warn(`Curve indexing failed [${failureCode(error)}].`);}
+  stage='signer_authority';
   const authority=await request(signer,'/v1/status',env.SIGNER_WORKER_TOKEN);
   if(!authority.signingReady||!authority.workerAuthorized||authority.chainId!==56)throw Error('Worker signing authority unavailable');
-  try{await request(signer,'/v1/protocol/tick',env.SIGNER_WORKER_TOKEN,{});}catch{console.warn('Protocol fee processing awaits confirmed routing, funds or reconciliation.');}
+  try{await request(signer,'/v1/protocol/tick',env.SIGNER_WORKER_TOKEN,{});}catch(error){console.warn(`Protocol fee processing pending [${failureCode(error)}].`);}
+  stage='operation_queue';
   const {operations,domainFunding=[]}=await site();
   for(const job of domainFunding){
     if(stopping)break;
@@ -41,10 +42,10 @@ async function cycle(){
     }catch{console.warn('An agent operation awaits reconciliation. Its existing ID is retained.');}
     try{await site({action:'reconcile',id:op.id});}catch{console.warn('Operation settlement is pending.');}
   }
-  await site({action:'domains'});
-  await site({action:'tick'});lastSuccess=Date.now();
+  stage='domain_tick';await site({action:'domains'});
+  stage='agent_tick';await site({action:'tick'});lastSuccess=Date.now();
 }
 const health=createServer((_req,res)=>{const ok=Date.now()-lastSuccess<240000;res.writeHead(ok?200:503,{'Content-Type':'application/json'});res.end(JSON.stringify({ok}));});
 health.listen(Number(env.PORT??8081),'0.0.0.0');
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{stopping=true;health.close();});
-while(!stopping){try{await cycle();}catch{console.warn('Agent worker could not finish this cycle. No success has been recorded.');}if(!stopping)await delay(15000);}
+while(!stopping){try{await cycle();}catch(error){console.warn(`Agent worker failed [${stage}/${failureCode(error)}]. No success has been recorded.`);}if(!stopping)await delay(15000);}

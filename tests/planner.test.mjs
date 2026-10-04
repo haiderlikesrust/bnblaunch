@@ -178,3 +178,28 @@ test('fee audit failure records real balance and reason without authorizing spen
   assert.equal(f.calls.length,0);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_operations').get().n,0);
  }finally{f.close()}
 });
+
+
+test('disabled X does not block planning when unused X billing is invalid',async()=>{
+ const f=fixture(),previous=env.X_READ_COST_MICROUSD;env.X_READ_COST_MICROUSD='';
+ try{assert.equal((await runAgentTick(['autonomous-planning'])).reason,'plan_completed');assert.equal(f.calls.length,2);}
+ finally{if(previous===undefined)delete env.X_READ_COST_MICROUSD;else env.X_READ_COST_MICROUSD=previous;f.close();}
+});
+
+test('missing research configuration records an actionable blocker without paid calls',async()=>{
+ const f=fixture(),previous=env.BRAVE_COST_MICROUSD;delete env.BRAVE_COST_MICROUSD;
+ try{
+  f.sql.prepare('UPDATE coins SET config=?').run(JSON.stringify({...f.coin,research:true}));
+  assert.equal((await runAgentTick(['autonomous-planning'])).reason,'research_configuration_required');
+  assert.equal(f.sql.prepare('SELECT last_reason FROM runtime_leases').get().last_reason,'research_configuration_required');
+  assert.equal(f.calls.length,0);assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM agent_runs').get().n,0);
+ }finally{if(previous!==undefined)env.BRAVE_COST_MICROUSD=previous;f.close();}
+});
+
+test('a failed planner records its failure stage and keeps ambiguous credit reserved',async()=>{
+ const f=fixture();try{
+  f.fail();await assert.rejects(runAgentTick(['autonomous-planning']));
+  assert.equal(f.sql.prepare('SELECT last_reason FROM runtime_leases').get().last_reason,'planner_request_failed');
+  assert.equal(f.sql.prepare('SELECT status FROM agent_runs').get().status,'reserved');
+ }finally{f.close();}
+});

@@ -99,17 +99,23 @@ export async function runAgentTick(capabilities?:string[]){
     if(await db().prepare("SELECT id FROM domain_orders WHERE coin_id=? AND status IN ('queued','funding','reserve','purchase','review')").bind(coin.id).first())return tickResult("domain_payment_pending");
     const schedule=await db().prepare("SELECT next_plan_at FROM runtime_leases WHERE coin_id=?").bind(coin.id).first<{next_plan_at:number}>();
     if(schedule&&schedule.next_plan_at>Date.now())return tickResult("awaiting_next_plan");
+    lastReason="model_pricing_unavailable";
     const prices=await Promise.all([chatPrice(agentModel(coin.modelId).id),chatPrice(GUARDRAIL_MODEL)]);
     const researchCost=coin.research?Number(env.BRAVE_COST_MICROUSD):0;
-    if(coin.research&&(!Number.isSafeInteger(researchCost)||researchCost<=0||!env.BRAVE_API_KEY))throw new AppError(412,"Brave billing must be configured before research.");
+    if(coin.research&&(!Number.isSafeInteger(researchCost)||researchCost<=0||!env.BRAVE_API_KEY))return tickResult("research_configuration_required");
     const ceiling=callCeiling(prices[0],PLANNER_OUTPUT_TOKENS)+callCeiling(prices[1],800,64000)+researchCost;
-    const xRates=xCosts("https://shen.now");
-    const contentAllowance=(coin.images?125000:0)+(coin.social?xRates.post+xRates.upload+xRates.read*3:0);
+    lastReason="social_billing_invalid";
+    const xRates=coin.social?xCosts("https://shen.now"):null;
+    const contentAllowance=(coin.images?125000:0)+(xRates?xRates.post+xRates.upload+xRates.read*3:0);
+    lastReason="signer_policy_unavailable";
     const signerPolicy=await signerRequest<{gasReserveWei:string;buybacksEnabled:boolean}>("/v1/status");
     const protocolReserve=BigInt(wallet.protocolReserveWei);
     const minimumGas=BigInt(signerPolicy.gasReserveWei),gasReserve=wei/100n>minimumGas?wei/100n:minimumGas,available=wei>gasReserve+protocolReserve?wei-gasReserve-protocolReserve:0n;
     if(row.ai_credit_microusd<ceiling+contentAllowance){
-      const price=await bnbPrice(),capacity=await computeCapacity();
+      lastReason="funding_price_unavailable";
+      const price=await bnbPrice();
+      lastReason="service_capacity_unavailable";
+      const capacity=await computeCapacity();
       // A refill can be smaller than the preferred batch. Funds, gas and
       // provider collateral bound it; no fixed fraction of treasury does.
       const affordable=Number((available>minimumGas?available-minimumGas:0n)*price.answer/100000000000000000000n);
@@ -120,6 +126,7 @@ export async function runAgentTick(capabilities?:string[]){
       const {amountWei:amount,reserveMicrousd:fundingReserve}=payment;
       await queue(lease,"compute",amount.toString(),"Prepay metered agent services from treasury.",{reserve:fundingReserve,capacity:capacity.available});return tickResult("service_payment_queued");
     }
+    lastReason="planning_context_unavailable";
     const tokenBalance=await chainClient().readContract({address:coin.tokenAddress as Address,abi:parseAbi(["function balanceOf(address) view returns(uint256)"]),functionName:"balanceOf",args:[wallet.address as Address]});
     const [community,market,hosted,costs,domains,operations]=await Promise.all([contentSnapshot(coin),marketContext(row.token_address!),publishedWebsite(coin.id),db().prepare(`SELECT
       (SELECT COALESCE(SUM(cost_microusd),0) FROM agent_runs WHERE coin_id=? AND status='settled' AND created_at>?) +
@@ -135,7 +142,9 @@ export async function runAgentTick(capabilities?:string[]){
     nextPlanAt=Date.now()+15*60000;
     // Any ambiguous provider failure keeps its reservation. Non-billable chain
     // preflight is complete before reserving, so known local failures don't lock credit.
+    lastReason="research_request_failed";
     const sources=(coin.research?await recordResearch(coin,run.id,()=>research(coin)):[]).slice(0,3).map(s=>({title:s.title.slice(0,120),url:s.url.slice(0,512),description:s.description.slice(0,400)}));
+    lastReason="planning_context_unavailable";
     // Project bounded facts, not full old image prompts or entire site copies.
     const communityContext={...community,recent:community.recent.map(j=>({status:j.status,tweetId:j.tweetId,createdAt:j.createdAt,publication:{destination:j.publication.destination,text:String(j.publication.text).slice(0,400),altText:String(j.publication.altText??'').slice(0,160)}}))};
     const previousSite=hosted?{title:hosted.site.title,tagline:hosted.site.tagline,about:hosted.site.about.slice(0,500),theme:hosted.site.theme,layout:hosted.site.layout,revision:hosted.site.revision,sectionHeadings:hosted.site.sections.map(s=>s.heading)}:null;
@@ -144,6 +153,7 @@ export async function runAgentTick(capabilities?:string[]){
     const system=PLANNER_RULES+" Write content in "+(coin.language==="zh"?"Simplified Chinese.":"English.");
     let bounded;
     try{bounded=boundedPlanningContext(system,snapshot)}catch(error){await settle(coin.id,run,researchCost,'Essential planning context exceeded the local input bound.');throw error;}
+    lastReason="planner_request_failed";
     let result;
     try{result=await chatCompletion(prices[0],system,bounded,PLANNER_OUTPUT_TOKENS,32000,{coinId:coin.id,runId:run.id,kind:"planner"});}catch(error){
       if(error instanceof PaidCompletionRejected){await settle(coin.id,run,researchCost+error.cost,'Planner output rejected with a verified cost receipt.');return tickResult("plan_rejected");}
@@ -151,11 +161,13 @@ export async function runAgentTick(capabilities?:string[]){
     }
     let plan;
     try{plan=validatePlanFunds(agentPlan.parse(JSON.parse(result.text)),available,tokenBalance);if(["buyback","buyback_burn"].includes(plan.transaction.kind)&&!signerPolicy.buybacksEnabled)throw Error("Buyback policy disabled");if(plan.domain&&(!domains.enabled||domains.pending))throw Error("Domain capability unavailable");if(plan.publication)validatePublication(plan.publication,{social:snapshot.canPostX,images:snapshot.canGenerateImages,connected:community.xConnected});}catch{await settle(coin.id,run,result.cost+researchCost,"Plan rejected by schema or spending policy.");return tickResult("plan_rejected");}
+    lastReason="guard_request_failed";
     let guard;
     try{guard=await chatCompletion(prices[1],PLAN_GUARD_RULES,{snapshot:bounded,plan},800,64000,{coinId:coin.id,runId:run.id,kind:"plan-guard"});}catch(error){
       if(error instanceof PaidCompletionRejected){await settle(coin.id,run,result.cost+researchCost+error.cost,'Plan guard output rejected with a verified cost receipt.');return tickResult("plan_rejected");}
       if(error instanceof AppError&&(error.status===413||error.status===412))await settle(coin.id,run,result.cost+researchCost,'Guard request rejected before dispatch.');throw error;
     }
+    lastReason="plan_save_failed";
     let decoded:unknown;try{decoded=JSON.parse(guard.text)}catch{decoded=null}
     const verdict=z.object({allow:z.boolean(),reason:z.string().max(1000)}).strict().safeParse(decoded);
     await settle(coin.id,run,result.cost+guard.cost+researchCost,JSON.stringify(plan));
@@ -175,5 +187,6 @@ export async function runAgentTick(capabilities?:string[]){
     if(!saved[0].meta.changes)throw new AppError(409,"Agent planning lease expired.");
     if(plan.transaction.kind!=="none")await queue(lease,plan.transaction.kind,plan.transaction.amountWei,plan.transaction.reason);
     nextPlanAt=Date.now()+plan.nextCheckMinutes*60000;return tickResult("plan_completed");
+  } catch(error) {console.warn(`Agent check failed [${lastReason}].`);throw error;
   } finally {await db().prepare("UPDATE runtime_leases SET lease_id=NULL,lease_until=0,next_run_at=?,next_plan_at=COALESCE(?,next_plan_at),last_checked_at=?,last_reason=? WHERE coin_id=? AND lease_id=?").bind(Date.now()+nextMinutes*60000,nextPlanAt,Date.now(),lastReason,lease.coinId,lease.id).run();}
 }

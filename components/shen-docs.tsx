@@ -76,7 +76,7 @@ export default function ShenDocs({t}:{t:T}){
     ["等待服务就绪","Waiting for services","至少一项所需能力或服务不可用。先查看具体原因，条件满足后再验证发行。","A required capability or service is unavailable. Read the specific reason and validate the launch once the condition is resolved."],
     ["等待确认","Awaiting confirmations","交易已提交，页面会自动等待足够的链上确认并更新。刷新页面后会继续检查；如果验证失败，可重试验证。","The page automatically waits for on-chain confirmations and updates after launch. Verification resumes after a refresh. If verification fails, use Retry verification; this does not send another transaction."],
     ["等待资金","Awaiting funding","代币已发行，智能体仍在等待确认的资金、运行额度或就绪条件。查看金库与状态说明。","The token is launched; the agent is waiting for confirmed funding, operating credit or another readiness condition. Read its treasury and status information."],
-    ["运行中","Active","资金与就绪条件允许活动。它仍可以等待下一次执行时机，无需持续交易或发帖。","Funding and readiness allow activity. The agent may still wait for its next decision; it does not need to trade or post continuously."],
+    ["资金已达标","Funded","最近记录的余额达到启动门槛。这不代表工作已完成；请查看智能体控制台中的检查结果和阻碍原因。","The last recorded balance meets the activation threshold. This does not confirm completed work; check the agent console for progress or blockers."],
     ["聊天关闭","Chat closed","当前不是可用的问答时段，或资金、限额与服务条件不足。查看下一次检查时间，公开信息仍然可读。","A Q&A window is closed, or funding, limits or services do not permit replies. Check the next review time; public information remains readable."],
    ].map(([zh,en,zd,ed])=><tr key={en}><th scope="row">{t(zh,en)}</th><td>{t(zd,ed)}</td></tr>)}</tbody></table></div></Section>
 

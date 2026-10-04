@@ -15,6 +15,7 @@ test('console reports recorded failures and actual worker check time instead of 
  const coin={id:'coin',tokenAddress:'0x123',balance:0,threshold:.01};
  const failed=await agentConsole(coin);assert.equal(failed.state,'rpc_log_limit');assert.equal(failed.lastCheckAt,now-12000);assert.notEqual(failed.lastCheckAt,failed.observedAt);
  reason='awaiting_treasury_funding';assert.equal((await agentConsole(coin)).state,'awaiting_funds');
+ for(const stage of ['research_configuration_required','model_pricing_unavailable','funding_price_unavailable','service_capacity_unavailable','planner_request_failed']){reason=stage;assert.equal((await agentConsole(coin)).state,stage);}
  reason=null;assert.equal((await agentConsole(coin)).state,'check_unconfirmed');
  capabilities=[];assert.equal((await agentConsole(coin)).state,'services_unavailable');
 });
