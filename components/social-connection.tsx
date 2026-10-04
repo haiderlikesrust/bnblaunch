@@ -2,13 +2,14 @@
 import { useEffect, useState } from 'react';
 import { Check, LockKeyhole, LoaderCircle, ArrowUpRight } from 'lucide-react';
 import type { T } from '@/lib/ui';
+import {openXConnection} from '@/lib/x-connection-flow';
 type Status={configured:boolean;connected:boolean;username:string|null;reconnectRequired:boolean;error?:string};
 export default function SocialConnection({coinId,t}:{coinId:string;t:T}){
  const [status,setStatus]=useState<Status|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
  // Returning from x.com via Back restores this page from cache with busy still set.
  useEffect(()=>{const restore=(event:PageTransitionEvent)=>{if(event.persisted)setBusy(false)};window.addEventListener('pageshow',restore);return()=>window.removeEventListener('pageshow',restore)},[]);
  useEffect(()=>{let alive=true;fetch('/api/coins/'+coinId+'/social').then(r=>r.json() as Promise<Status>).then(v=>{if(alive){if(v.error)setError(v.error);else setStatus(v)}}).catch(()=>{if(alive)setError('Could not check the X account.')});return()=>{alive=false}},[coinId]);
- async function connect(){setBusy(true);setError('');try{const r=await fetch('/api/coins/'+coinId+'/social',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'connect',consent:true})});const value=await r.json() as {url:string;error?:string};if(!r.ok)throw Error(value.error);const url=new URL(value.url);if(url.origin!=='https://x.com'||url.pathname!=='/i/oauth2/authorize')throw Error('Invalid X authorization link');window.location.assign(url.href)}catch(e){setError((e as Error).message);setBusy(false)}}
+ async function connect(){setBusy(true);setError('');try{await openXConnection(coinId)}catch(e){setError((e as Error).message);setBusy(false)}}
  return <section className="panel x-connection"><div className="panel-heading"><h2><span className="x-mark">𝕏</span>{t('社区账号','Community account')}</h2><span className={'status '+(status?.connected&&!status.reconnectRequired?'active':'dormant')}>{status?.connected&&!status.reconnectRequired?t('已连接','Connected'):t('待连接','Connect account')}</span></div>
  <p className="body-copy">{t('可在发行前或发行后通过 X 授权项目账号。连接、资金及服务就绪后，智能体自主决定何时发布。','Connect your project’s X account before or after launch. Once connected and funded, with publishing services ready, the agent decides when to post.')}</p>
  {status?.username&&<div className="x-connected"><Check size={18}/><a href={'https://x.com/'+status.username} target="_blank" rel="noreferrer">@{status.username}<ArrowUpRight size={15}/></a></div>}

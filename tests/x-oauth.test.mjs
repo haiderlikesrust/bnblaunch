@@ -11,13 +11,15 @@ const { beginXConnection, finishXConnection, socialStatus } = await import('../l
 const { xAccount, xSession, xCosts } = await import('../lib/social-config.ts');
 const { X_SCOPES } = await import('../lib/x-official.ts');
 const {GET:callback}=await import('../app/api/social/x/callback/route.ts');
+const {POST:connectRoute}=await import('../app/api/coins/[id]/social/route.ts');
+const {GET:listCoins}=await import('../app/api/coins/route.ts');
 const {xConnectionCode}=await import('../lib/x-connection-result.ts');
 const originalFetch = globalThis.fetch;
 const json = v => Response.json(v);
 function fixture() {
  const sql = new DatabaseSync(':memory:');
  for (const name of readdirSync('drizzle').filter(n => n.endsWith('.sql')).sort()) sql.exec(readFileSync('drizzle/' + name, 'utf8'));
- function prepare(query, args = []) { return { bind(...values) { return prepare(query, values); }, async run() { return { meta: { changes: Number(sql.prepare(query).run(...args).changes) } }; }, async first() { return sql.prepare(query).get(...args) ?? null; } }; }
+ function prepare(query, args = []) { return { bind(...values) { return prepare(query, values); }, async run() { return { meta: { changes: Number(sql.prepare(query).run(...args).changes) } }; }, async first() { return sql.prepare(query).get(...args) ?? null; },async all(){return {results:sql.prepare(query).all(...args)}} }; }
  env.DB = { prepare };
  sql.exec("INSERT INTO coins(id,owner,config,created_at,updated_at) VALUES('coin','owner','{}','now','now'),('other','owner','{}','now','now')");
  let userId = '123', requests = [], scope = X_SCOPES.join(' '), failRefresh = false;
@@ -40,6 +42,40 @@ async function callbackSession(f,state){
  globalThis.__xTestCookies={shen_session:session,shen_x_oauth:state};
 }
 const callbackRequest=state=>new Request('https://shen.now/api/social/x/callback?state='+state+'&code=private-authorization-code');
+
+test('owner connects X on an unlaunched saved coin, returns to its review, and can recover it from My agents',async()=>{
+ const f=fixture();try{
+  f.sql.prepare('UPDATE coins SET config=? WHERE id=?').run(JSON.stringify({id:'coin',social:true}),'coin');
+  await callbackSession(f,'');
+  const request=()=>new Request('https://shen.now/api/coins/coin/social',{method:'POST',headers:{origin:'https://shen.now','content-type':'application/json'},body:JSON.stringify({action:'connect',consent:true})});
+  const started=await connectRoute(request(),{params:Promise.resolve({id:'coin'})});assert.equal(started.status,200);
+  const state=new URL((await started.json()).url).searchParams.get('state');globalThis.__xTestCookies.shen_x_oauth=state;
+  assert.equal((await callback(callbackRequest(state))).headers.get('location'),'https://shen.now/token/coin?x=connected');
+  assert.equal((await socialStatus('coin')).connected,true);
+  assert.equal(f.sql.prepare('SELECT token_address FROM coins WHERE id=?').get('coin').token_address,null);
+  const listed=await (await listCoins()).json();assert.deepEqual(listed.coins.map(c=>c.id),['coin']);
+  assert.equal(f.requests.some(r=>r.url.endsWith('/tweets')),false,'connecting never publishes');
+  for(let i=0;i<2;i++)assert.equal((await connectRoute(request(),{params:Promise.resolve({id:'coin'})})).status,200);
+  assert.equal((await connectRoute(request(),{params:Promise.resolve({id:'coin'})})).status,429,'prelaunch requests retain OAuth limits');
+ }finally{f.close()}
+});
+
+test('prelaunch connection still requires wallet ownership, origin, selected social capability and consent',async()=>{
+ const f=fixture();try{
+  f.sql.prepare('UPDATE coins SET config=? WHERE id=?').run(JSON.stringify({id:'coin',social:true}),'coin');
+  const request=(origin='https://shen.now',consent=true)=>new Request('https://shen.now/api/coins/coin/social',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({action:'connect',consent})});
+  const invoke=(r)=>connectRoute(r,{params:Promise.resolve({id:'coin'})});
+  assert.equal((await invoke(request())).status,401);
+  await callbackSession(f,'');
+  assert.equal((await invoke(request('https://other.example'))).status,403);
+  assert.equal((await invoke(request('https://shen.now',false))).status,400);
+  f.sql.prepare('UPDATE coins SET owner=? WHERE id=?').run('stranger','coin');
+  assert.equal((await invoke(request())).status,404);
+  f.sql.prepare('UPDATE coins SET owner=?,config=? WHERE id=?').run('owner',JSON.stringify({id:'coin',social:false}),'coin');
+  assert.equal((await invoke(request())).status,403);
+  assert.equal(f.requests.length,0,'invalid requests never spend X credit');
+ }finally{f.close()}
+});
 
 for(const [status,message] of [[401,/application Bearer Token/],[403,/billing permissions/],[402,/insufficient API credit/],[429,/rate-limited/],[500,/Could not verify/]])test(`connection start explains X credit HTTP ${status} without leaking provider output`,async()=>{
  const f=fixture();try{

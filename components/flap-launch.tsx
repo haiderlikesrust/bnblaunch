@@ -5,6 +5,7 @@ import { confirmLaunch, LaunchConfirmationError } from "@/lib/launch-confirmatio
 import { readyWallet, prepareLaunch, sendLaunch, fundAgentGas, launchStatus, recordSubmission, rememberLaunch, rememberedLaunch, forgetLaunch } from "@/lib/launch-flow";
 import type { Coin } from "@/lib/model";
 import type { T } from "@/lib/ui";
+import {launchPreferences,rememberLaunchPreferences} from '@/lib/launch-preferences';
 
 type Pending={planId:string;hash:string};
 // Resumes a launch started from the create form, on any device.
@@ -15,6 +16,7 @@ export default function FlapLaunch({coin,onConfirmed,t}:{coin:Coin;onConfirmed:(
   const [pending,setPending]=useState<Pending|null>(null),[phase,setPhase]=useState<"loading"|"form"|"confirming"|"failed"|"replaced"|"done">("loading"),[retry,setRetry]=useState(0);
   const [buy,setBuy]=useState("0"),[tweetUrl,setTweetUrl]=useState(coin.tweetUrl??""),[file,setFile]=useState<File|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(""),[replacement,setReplacement]=useState("");
   const [readiness,setReadiness]=useState<{ready:boolean;reason:string}>({ready:false,reason:t("正在检查发行钱包…","Checking the launch wallet…")});
+  useEffect(()=>{const saved=launchPreferences(coin.id);if(saved.buy!==undefined)setBuy(saved.buy);if(saved.tweetUrl!==undefined)setTweetUrl(saved.tweetUrl)},[coin.id]);
   useEffect(()=>{
     let alive=true;
     async function check(){try{const status=await launchStatus(coin.id);if(!alive)return;setReadiness(status.readiness);
@@ -42,6 +44,7 @@ export default function FlapLaunch({coin,onConfirmed,t}:{coin:Coin;onConfirmed:(
   },[coin.id,pending,phase,retry]);
   async function launch(){
     setBusy(true);setMessage("");
+    rememberLaunchPreferences(coin.id,buy,tweetUrl);
     try{
       const account=await readyWallet();
       const plan=await prepareLaunch({coinId:coin.id,hasSavedImage:!!coin.imageUrl,file,account,buy,tweetUrl,onStage:stage=>setMessage(({wallet:"",create:"",authorize:t("正在准备智能体专属钱包…","Preparing the agent's dedicated wallet…"),metadata:t("正在通过 Flap 上传标志与元数据…","Pinning your logo and metadata through Flap…"),validate:t("正在计算代币地址并验证交易…","Finding the token address and validating the transaction…"),send:"",confirm:""})[stage])});
